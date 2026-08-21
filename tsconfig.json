@@ -1,4 +1,12 @@
 {
   "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
+  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }],
+  "_comment": "Solution-style config. `compilerOptions.paths` is duplicated here (unused by tsc) so the shadcn CLI can resolve `@/*` when vendoring components.",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@bindings": ["bindings/tauri.ts"]
+    }
+  }
 }

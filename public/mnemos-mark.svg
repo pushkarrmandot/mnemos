@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Mnemos">
+  <!--
+    Mnemos app mark. BRAND.md: the name is the muse of memory; the palette is
+    the warm copper accent from DESIGN_SYSTEM.md §2. One letterform, one
+    stroke, no gradient — "every pixel earns its place" (§1.5). Drawn heavy
+    enough that the M survives the 16×16 menu-bar render.
+  -->
+  <rect width="1024" height="1024" rx="224" fill="#C4753A"/>
+  <path d="M304 712V336l208 208 208-208v376"
+        fill="none" stroke="#FCFBF9" stroke-width="92"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

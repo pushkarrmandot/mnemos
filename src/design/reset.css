@@ -1,0 +1,73 @@
+/** Base reset. DESIGN_SYSTEM.md §5 (no ambient shadows), §10, §21 (focus ring). */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* App chrome is not a document: no rubber-band, no accidental text drag. */
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  p,
+  figure {
+    margin: 0;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+  }
+
+  ::selection {
+    background-color: var(--accent-primary-bg);
+    color: var(--accent-primary-text);
+  }
+
+  /* DESIGN_SYSTEM.md §21 — universal focus ring, overrides browser + shadcn.
+     Never `outline: none` without this replacement. */
+  :where(button, a, input, textarea, select, [role="button"], [tabindex]):focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--accent-primary) 40%, transparent);
+    outline-offset: 2px;
+    border-radius: inherit;
+  }
+
+  /* DESIGN_SYSTEM.md §14 — reduce disables every duration > 0 and every loop.
+     Fades stay at 80ms so appearance events remain legible. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms;
+      animation-iteration-count: 1;
+      transition-duration: 80ms;
+      scroll-behavior: auto;
+    }
+  }
+}

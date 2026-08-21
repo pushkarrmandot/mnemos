@@ -1,0 +1,139 @@
+/**
+ * DESIGN_SYSTEM.md §2 (color), §4 (spacing), §5 (radius), §6 + §14 (motion),
+ * §17 (icon color), §20 (reading rhythm).
+ *
+ * This is the ONLY file allowed to define `--*` custom properties
+ * (DESIGN_SYSTEM.md §11 rule 1). Everything else reads them.
+ *
+ * Theme strategy: `data-theme="light" | "dark"` on <html>, written only by
+ * <ThemeProvider>. SHELL_CHEATSHEET.md §3 supersedes the `.dark` class
+ * strategy named in DESIGN_SYSTEM.md §9 / FRONTEND_STANDARDS.md §5 —
+ * flagged there for owner review.
+ */
+
+:root {
+  /* ── Backgrounds — warm off-whites, never pure white in canvas ─────────── */
+  --bg-canvas: #fcfbf9;
+  --bg-elevated: #ffffff;
+  --bg-subtle: #f5f3ef;
+  --bg-hover: #efece5;
+  --bg-active: #e7e3d9;
+
+  /* ── Borders ───────────────────────────────────────────────────────────── */
+  --border-subtle: #eae6dc;
+  --border-strong: #d4cfc1;
+  --border-focus: var(--accent-primary);
+
+  /* ── Text ──────────────────────────────────────────────────────────────── */
+  --text-primary: #1c1917;
+  --text-secondary: #6b6a64;
+  --text-tertiary: #97958d;
+  --text-inverse: #fcfbf9;
+
+  /* ── Accent — warm copper. Precious: primary buttons, active nav, focus
+        rings, recording glow, brand marks. Nothing else (§2 usage rules). ── */
+  --accent-primary: #c4753a;
+  --accent-primary-hover: #b0682f;
+  --accent-primary-bg: #fbf1e6;
+  --accent-primary-text: #7a4517;
+
+  /* ── Signal colors — muted, single-meaning, never decorative ───────────── */
+  --success: #5f8c5f;
+  --success-bg: #e9f1e7;
+  --danger: #b54848;
+  --danger-bg: #f5e4e1;
+  --warning: #c69939;
+  --warning-bg: #f7eed8;
+  --info: #4f82af;
+  --info-bg: #e4eef6;
+
+  /* ── Recording indicator (red dot only) ────────────────────────────────── */
+  --recording: #d0433c;
+
+  /* ── Icon colors (§17) ─────────────────────────────────────────────────── */
+  --icon-primary: var(--text-primary);
+  --icon-muted: var(--text-secondary);
+  --icon-accent: var(--accent-primary);
+  --icon-danger: var(--danger);
+  --icon-success: var(--success);
+
+  /* ── Elevation (§5) — shadow is used for exactly two things: the floating
+        recording pane and toasts. Everything else layers backgrounds. ────── */
+  --shadow-floating: 0 4px 20px rgba(0, 0, 0, 0.08);
+
+  /* ── Type stacks (§3) ──────────────────────────────────────────────────── */
+  --font-display:
+    "Inter Display", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", sans-serif;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", monospace;
+
+  /* ── Radius (§5) ───────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  /* ── Raw motion scale (§6) ─────────────────────────────────────────────── */
+  --duration-micro: 150ms;
+  --duration-quick: 220ms;
+  --duration-page: 300ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* ── Semantic motion tokens (§14). These are what components consume;
+        §6 above is the raw scale they were derived from. ─────────────────── */
+  --motion-quick-duration: 120ms;
+  --motion-quick-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-tuck-duration: 180ms;
+  --motion-tuck-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-settle-duration: 220ms;
+  --motion-settle-ease: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --motion-slide-duration: 280ms;
+  --motion-slide-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-pulse-duration: 1400ms;
+  --motion-pulse-ease: cubic-bezier(0.4, 0, 0.6, 1);
+
+  /* ── Reading rhythm (§20) — deliberately parallel to --space-* ─────────── */
+  --space-reading-1: 8px;
+  --space-reading-2: 16px;
+  --space-reading-4: 32px;
+  --space-reading-6: 48px;
+
+  /* ── Shell geometry (SHELL_CHEATSHEET.md §2, DESIGN_SYSTEM.md §7) ──────── */
+  --nav-width: 240px;
+  --rail-width: 320px;
+}
+
+[data-theme="dark"] {
+  --bg-canvas: #17140f;
+  --bg-elevated: #201c15;
+  --bg-subtle: #1b1811;
+  --bg-hover: #2a2519;
+  --bg-active: #332d21;
+
+  --border-subtle: #2d2820;
+  --border-strong: #3e3628;
+
+  --text-primary: #efeae0;
+  --text-secondary: #a69e90;
+  --text-tertiary: #6c6558;
+  --text-inverse: #17140f;
+
+  --accent-primary: #e7a85e;
+  --accent-primary-hover: #f0b876;
+  --accent-primary-bg: #38281a;
+  --accent-primary-text: #f5c68a;
+
+  --success: #78a97a;
+  --success-bg: #1e2a1e;
+  --danger: #c56c6c;
+  --danger-bg: #2a1b1b;
+  --warning: #d9b36a;
+  --warning-bg: #2a241b;
+  --info: #6ea9c9;
+  --info-bg: #1b2530;
+
+  --recording: #e85a52;
+
+  --shadow-floating: 0 4px 20px rgba(0, 0, 0, 0.4);
+}

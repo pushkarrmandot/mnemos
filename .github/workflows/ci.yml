@@ -27,6 +27,11 @@ jobs:
       - run: pnpm exec biome ci .
       - run: pnpm typecheck
       - run: pnpm test
+      # The TanStack Router plugin writes src/routeTree.gen.ts during the
+      # build; a diff means someone added or renamed a route file without
+      # committing the regen (SHELL_CHEATSHEET §1).
+      - run: pnpm exec vite build
+      - run: git diff --exit-code src/routeTree.gen.ts
 
   rust:
     name: rust (${{ matrix.os }})

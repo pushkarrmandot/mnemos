@@ -1,0 +1,154 @@
+/**
+ * The single stylesheet the app imports. Everything else is reached from here.
+ * DESIGN_SYSTEM.md §11 file contract.
+ */
+
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./reset.css";
+@import "./typography.css";
+
+/* SHELL_CHEATSHEET.md §3 — we drive the theme off `data-theme`, not a `.dark`
+   class, so the no-FOUC inline script in index.html and the ThemeProvider
+   write exactly one attribute. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/**
+ * shadcn's semantic namespace, remapped onto Mnemos tokens. Vendored
+ * components in `components/ui/*` are never edited (FRONTEND_STANDARDS §4);
+ * this mapping is how they stop looking like default shadcn. The per-component
+ * geometry overrides from DESIGN_SYSTEM.md §21 (heights, radii, motion) live
+ * in the `components/app/*` wrappers.
+ *
+ * `inline` matters: it makes the utilities resolve `var(--bg-canvas)` at use
+ * time, so flipping `data-theme` re-themes without regenerating any CSS.
+ */
+@theme inline {
+  --color-background: var(--bg-canvas);
+  --color-foreground: var(--text-primary);
+  --color-card: var(--bg-elevated);
+  --color-card-foreground: var(--text-primary);
+  --color-popover: var(--bg-elevated);
+  --color-popover-foreground: var(--text-primary);
+  --color-primary: var(--accent-primary);
+  --color-primary-foreground: var(--text-inverse);
+  --color-secondary: var(--bg-subtle);
+  --color-secondary-foreground: var(--text-primary);
+  --color-muted: var(--bg-subtle);
+  --color-muted-foreground: var(--text-secondary);
+  --color-accent: var(--bg-hover);
+  --color-accent-foreground: var(--text-primary);
+  --color-destructive: var(--danger);
+  --color-destructive-foreground: var(--text-inverse);
+  --color-border: var(--border-subtle);
+  --color-input: var(--border-strong);
+  --color-ring: var(--accent-primary);
+
+  /* Mnemos-named colors that don't collide with the shadcn namespace. */
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-primary-hover: var(--accent-primary-hover);
+  --color-accent-primary-bg: var(--accent-primary-bg);
+  --color-accent-primary-text: var(--accent-primary-text);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-recording: var(--recording);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+
+  --shadow-floating: var(--shadow-floating);
+}
+
+/**
+ * Surface / text / border utilities named exactly as DESIGN_SYSTEM.md §11 and
+ * FRONTEND_STANDARDS.md §5 spell them.
+ *
+ * Written as raw `@layer utilities` rather than `@theme` colors for two
+ * reasons: `bg-subtle` (a surface) and `border-subtle` (a line) are different
+ * tokens that would have to share one color-namespace key, and `text-primary`
+ * (our body text color) collides with the `primary` key shadcn needs for
+ * `bg-primary`. Declaring them here, last, settles both — these definitions
+ * win over anything the theme generates under the same name.
+ */
+@layer utilities {
+  .bg-canvas {
+    background-color: var(--bg-canvas);
+  }
+  .bg-elevated {
+    background-color: var(--bg-elevated);
+  }
+  .bg-subtle {
+    background-color: var(--bg-subtle);
+  }
+  .bg-hover {
+    background-color: var(--bg-hover);
+  }
+  .bg-active {
+    background-color: var(--bg-active);
+  }
+  .hover\:bg-hover:hover {
+    background-color: var(--bg-hover);
+  }
+  .hover\:bg-active:hover {
+    background-color: var(--bg-active);
+  }
+
+  .text-primary {
+    color: var(--text-primary);
+  }
+  .text-secondary {
+    color: var(--text-secondary);
+  }
+  .text-tertiary {
+    color: var(--text-tertiary);
+  }
+  .text-inverse {
+    color: var(--text-inverse);
+  }
+  .hover\:text-primary:hover {
+    color: var(--text-primary);
+  }
+
+  .border-subtle {
+    border-color: var(--border-subtle);
+  }
+  .border-strong {
+    border-color: var(--border-strong);
+  }
+}
+
+@utility motion-quick {
+  transition-duration: var(--motion-quick-duration);
+  transition-timing-function: var(--motion-quick-ease);
+}
+@utility motion-tuck {
+  transition-duration: var(--motion-tuck-duration);
+  transition-timing-function: var(--motion-tuck-ease);
+}
+@utility motion-settle {
+  transition-duration: var(--motion-settle-duration);
+  transition-timing-function: var(--motion-settle-ease);
+}
+@utility motion-slide {
+  transition-duration: var(--motion-slide-duration);
+  transition-timing-function: var(--motion-slide-ease);
+}
+
+@layer base {
+  /* §8 / §17 — Lucide at 1.75 stroke, never the 2px default. */
+  svg[data-lucide],
+  .lucide {
+    stroke-width: 1.75;
+  }
+}

@@ -1,4 +1,6 @@
 import { fileURLToPath, URL } from "node:url";
+import tailwindcss from "@tailwindcss/vite";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
@@ -7,7 +9,17 @@ const host = process.env.TAURI_DEV_HOST;
 const isDebug = !!process.env.TAURI_ENV_DEBUG;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    // Must run before the React plugin (TanStack Router requirement).
+    tanstackRouter({
+      target: "react",
+      routesDirectory: "./src/routes",
+      generatedRouteTree: "./src/routeTree.gen.ts",
+      autoCodeSplitting: false,
+    }),
+    react(),
+    tailwindcss(),
+  ],
 
   resolve: {
     alias: {
@@ -22,8 +34,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: host ?? false,
-    // `exactOptionalPropertyTypes` — omit the key entirely rather than passing
-    // `undefined`, which Vite's ServerOptions does not accept.
+    // Omit the key entirely rather than passing `undefined`, which Vite's
+    // ServerOptions does not accept.
     ...(host ? { hmr: { protocol: "ws", host, port: 1421 } } : {}),
     watch: {
       // Rust rebuilds are driven by cargo, not Vite.

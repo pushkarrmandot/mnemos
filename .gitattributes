@@ -2,6 +2,7 @@
 
 # Generated — collapse in diffs, but still reviewed by the CI drift check.
 bindings/tauri.ts linguist-generated=true
+src/routeTree.gen.ts linguist-generated=true
 pnpm-lock.yaml    linguist-generated=true
 src-tauri/Cargo.lock linguist-generated=true
 

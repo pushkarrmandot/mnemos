@@ -1,0 +1,45 @@
+{
+  "app.name": "Mnemos",
+  "app.tagline": "Remember every conversation. Locally.",
+
+  "nav.section.workspace": "Workspace",
+  "nav.home": "Home",
+  "nav.contacts": "Contacts",
+  "nav.integrations": "Integrations",
+  "nav.settings": "Settings",
+  "nav.newProject": "New Project",
+  "nav.label": "Primary",
+
+  "rail.title": "Chat",
+  "rail.stub": "Chat coming in W13",
+  "rail.collapse": "Collapse chat",
+  "rail.expand": "Open chat",
+
+  "toast.region": "Notifications",
+
+  "theme.label": "Appearance",
+  "theme.light": "Light",
+  "theme.dark": "Dark",
+  "theme.system": "System",
+
+  "empty.dashboard.heading": "Nothing to remember yet — record a conversation.",
+  "empty.dashboard.body": "Conversations you record land here, understood and searchable.",
+  "empty.project.heading": "This project is quiet.",
+  "empty.project.body": "Start a conversation and it'll fill up here.",
+  "empty.conversation.heading": "This conversation hasn't been opened yet.",
+  "empty.conversation.body": "Transcript, decisions, and action items appear here once it's processed.",
+  "empty.contacts.heading": "No contacts yet. They'll appear here as you name speakers.",
+  "empty.integrations.heading": "No integrations connected.",
+  "empty.integrations.body": "Calendars and other sources connect here. Nothing leaves your machine.",
+  "empty.onboarding.heading": "Mnemos does the remembering, so you can be present in the room.",
+  "empty.onboarding.body": "The setup funnel lands in a later wave.",
+
+  "settings.heading": "Settings",
+  "settings.appearance.heading": "Appearance",
+  "settings.appearance.body": "Light is the default. System follows your machine.",
+  "settings.placeholder": "The rest of Settings lands in a later wave.",
+
+  "error.section.heading": "This section had a problem.",
+  "error.section.body": "The rest of Mnemos is still running.",
+  "error.section.action": "Reload this section"
+}

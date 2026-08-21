@@ -1,0 +1,109 @@
+/** DESIGN_SYSTEM.md §3 type scale + §20 reading views. */
+
+@layer base {
+  :root {
+    /* OpenType: cv11 single-story a, ss01 single-story g, tabular numerals. */
+    font-feature-settings:
+      "cv11" 1,
+      "ss01" 1;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Named scale rows from §3. Each sets size / line-height / weight together —
+     they are one decision, never mixed and matched. */
+  .type-display {
+    font-family: var(--font-display);
+    font-size: 32px;
+    line-height: 40px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+  }
+
+  .type-h1 {
+    font-size: 22px;
+    line-height: 30px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+
+  .type-h2 {
+    font-size: 17px;
+    line-height: 24px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+
+  .type-h3 {
+    font-size: 15px;
+    line-height: 22px;
+    font-weight: 500;
+  }
+
+  .type-body-lg {
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 400;
+    letter-spacing: -0.005em;
+  }
+
+  .type-body {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+
+  .type-caption {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+  }
+
+  .type-micro {
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .type-mono {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+
+  .type-mono-sm {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 18px;
+    font-weight: 400;
+  }
+
+  /* §15 density scale. A list, card, or reading surface picks exactly one. */
+  .density-dense {
+    min-height: 32px;
+    padding-inline: 8px;
+    padding-block: 6px;
+    font-size: 13px;
+    line-height: 1.375;
+  }
+
+  .density-regular {
+    min-height: 44px;
+    padding-inline: 12px;
+    padding-block: 10px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .density-breathable {
+    max-width: 68ch;
+    padding-block: 12px;
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--text-primary);
+  }
+}

@@ -11,7 +11,9 @@
       "!**/dist",
       "!**/node_modules",
       "!**/src-tauri/target",
-      "!**/bindings/tauri.ts"
+      "!**/bindings/tauri.ts",
+      "!**/src/components/ui",
+      "!**/src/routeTree.gen.ts"
     ]
   },
   "formatter": {
@@ -39,7 +41,9 @@
         "noExplicitAny": "error",
         "noConsole": {
           "level": "error",
-          "options": { "allow": ["error", "warn", "debug"] }
+          "options": {
+            "allow": ["error", "warn", "debug"]
+          }
         }
       },
       "style": {
@@ -49,6 +53,15 @@
       "correctness": {
         "noUnusedImports": "error",
         "noUnusedVariables": "error"
+      },
+      "nursery": {
+        "useSortedClasses": {
+          "level": "error",
+          "options": {
+            "attributes": ["className"],
+            "functions": ["cn", "clsx", "cva", "twMerge"]
+          }
+        }
       }
     }
   },
@@ -58,6 +71,11 @@
       "source": {
         "organizeImports": "on"
       }
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
     }
   }
 }

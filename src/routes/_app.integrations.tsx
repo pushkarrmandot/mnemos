@@ -1,0 +1,18 @@
+import { createFileRoute } from "@tanstack/react-router";
+import { EmptyState } from "@/components/app/EmptyState";
+import { t } from "@/lib/i18n";
+
+/** `/integrations` — calendar wiring arrives with W17. */
+export const Route = createFileRoute("/_app/integrations")({
+  component: IntegrationsRoute,
+});
+
+function IntegrationsRoute() {
+  return (
+    <EmptyState
+      body={t("empty.integrations.body")}
+      heading={t("empty.integrations.heading")}
+      illustration="empty-project"
+    />
+  );
+}
