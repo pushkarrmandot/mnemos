@@ -1,0 +1,18 @@
+# Shared pre-commit hooks (BACKEND §9, FRONTEND §8).
+# Install once with: pnpm dlx lefthook install
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      glob: "*.{ts,tsx,js,jsx,json,jsonc,css}"
+      run: pnpm exec biome check --write --no-errors-on-unmatched {staged_files}
+      stage_fixed: true
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: pnpm typecheck
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

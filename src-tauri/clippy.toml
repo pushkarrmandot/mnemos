@@ -1,0 +1,8 @@
+# BACKEND §7: stdout is reserved for JSON-RPC framing to the Python worker, and
+# all real logging goes through `tracing`. stderr is deliberately NOT banned —
+# `tauri::generate_context!` expands to `eprintln!`, and stderr carries logs.
+disallowed-macros = [
+  { path = "std::println", reason = "use tracing::info! — stdout is reserved for IPC framing" },
+  { path = "std::print", reason = "use tracing::info! — stdout is reserved for IPC framing" },
+  { path = "std::dbg", reason = "use tracing::debug!" },
+]
