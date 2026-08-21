@@ -31,6 +31,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
+async-trait = "0.1"
+regex-lite = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 # Present so `tauri build --features custom-protocol` keeps working.
 custom-protocol = ["tauri/custom-protocol"]

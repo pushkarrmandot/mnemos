@@ -2,6 +2,7 @@
 //! here so the crate stays testable and mobile-ready.
 
 pub mod commands;
+pub mod db;
 pub mod error;
 pub mod fs;
 pub mod logging;
@@ -10,6 +11,7 @@ pub mod state;
 use tauri::Manager;
 use tauri_specta::{collect_commands, collect_events, Builder};
 
+use crate::error::AppError;
 use crate::state::AppState;
 
 /// Where the generated TypeScript bindings land, relative to `src-tauri/`.
@@ -62,7 +64,19 @@ pub fn run() {
 
             let version = app.package_info().version.to_string();
             tracing::info!(component = "host", version = %version, "mnemos starting");
-            app.manage(AppState::new(version));
+
+            let db_path = crate::fs::paths::db_path()?;
+            let storage = tauri::async_runtime::block_on(async {
+                let pools = crate::db::init(&db_path).await?;
+                let service = crate::db::service::SqliteStorageService::new(pools);
+                // Crash-resume (LLD-01 §7.5) runs before any command handler
+                // is reachable, so a half-finished delete from last session
+                // never leaves stale data visible to the UI.
+                use crate::db::service::StorageService;
+                service.resume_pending_deletes().await?;
+                Ok::<_, AppError>(service)
+            })?;
+            app.manage(AppState::new(version, storage));
 
             Ok(())
         })
