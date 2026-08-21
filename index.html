@@ -5,25 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/mnemos-mark.svg" />
     <title>Mnemos</title>
-    <!--
-      No FOUC (SHELL_CHEATSHEET.md §3). Runs before any bundle, resolves the
-      persisted preference to a concrete theme and stamps it on <html>. The
-      storage key and the bare-string format are owned by src/stores/ui.ts.
-    -->
-    <script>
-      (() => {
-        try {
-          const s = localStorage.getItem("mnemos.theme") || "light";
-          const t =
-            s === "system"
-              ? matchMedia("(prefers-color-scheme:dark)").matches
-                ? "dark"
-                : "light"
-              : s;
-          document.documentElement.setAttribute("data-theme", t);
-        } catch {}
-      })();
-    </script>
+    <!-- Render-blocking, before the bundle. See public/theme-init.js. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>
