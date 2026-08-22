@@ -1,26 +1,21 @@
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
-import { useState } from "react";
 import { Button } from "@/components/app/Button";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { ChatPane } from "@/components/app/chat/ChatPane";
+import { type RecState, useRecordingStore } from "@/stores/recording";
+import { useUIStore } from "@/stores/ui";
 
-/**
- * DESIGN_SYSTEM.md §7 chat-pane recipe: fixed width when open, collapsible to
- * zero, `bg-canvas` (it is content, not chrome), 1px left rule.
- *
- * W2 ships the geometry and the collapse affordance only. Open/collapsed state
- * moves to `useUIStore.railOpen` in W3; the real chat arrives in W13.
- */
-function ChatPaneStub() {
-  return (
-    <div className="flex flex-1 items-center justify-center px-6">
-      <p className="type-body text-center text-secondary">{t("rail.stub")}</p>
-    </div>
-  );
-}
+/** LLD-11 "chat pane stays force-collapsed while recording" — active
+ * capture states only; once Stop is pressed the route has already
+ * navigated away from `/recording`. */
+const FORCE_COLLAPSED_STATES: readonly RecState[] = ["arming", "recording", "paused", "stopping"];
 
 export function RightRail() {
-  const [open, setOpen] = useState(true);
+  const railOpen = useUIStore((state) => state.railOpen);
+  const setRailOpen = useUIStore((state) => state.setRailOpen);
+  const forceCollapsed = useRecordingStore((state) => FORCE_COLLAPSED_STATES.includes(state.state));
+  const open = railOpen && !forceCollapsed;
 
   return (
     <aside
@@ -36,7 +31,8 @@ export function RightRail() {
         <Button
           aria-label={open ? t("rail.collapse") : t("rail.expand")}
           className="ml-auto"
-          onClick={() => setOpen((value) => !value)}
+          disabled={forceCollapsed}
+          onClick={() => setRailOpen(!railOpen)}
           size="icon"
           variant="ghost"
         >
@@ -44,7 +40,7 @@ export function RightRail() {
         </Button>
       </div>
 
-      {open ? <ChatPaneStub /> : null}
+      {open ? <ChatPane /> : null}
     </aside>
   );
 }
