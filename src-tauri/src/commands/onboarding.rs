@@ -366,9 +366,12 @@ pub fn onboarding_open_system_settings(pane: SettingsPane) {
         SettingsPane::ScreenRecording => "ms-settings:privacy",
     };
     #[cfg(target_os = "windows")]
-    let spawn_result = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    let spawn_result = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        crate::procutil::suppress_console_window(&mut command);
+        command.spawn()
+    };
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Err(e) = spawn_result {

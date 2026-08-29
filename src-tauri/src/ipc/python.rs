@@ -789,15 +789,45 @@ impl WorkerSupervisor {
             .current_dir(&self.cfg.cwd)
             .env_clear()
             .env("PYTHONUNBUFFERED", "1")
+            // Forces UTF-8 I/O regardless of the OS locale codepage —
+            // required unconditionally (not just re-forwarded from the
+            // parent env, since we `env_clear()`) to avoid
+            // `UnicodeEncodeError` when structlog writes non-ASCII to
+            // stderr under Windows' default cp1252 stderr encoding. See
+            // Windows parity audit findings #4 and #15.
+            .env("PYTHONUTF8", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        for var in ["PATH", "HOME", "USERPROFILE"] {
+        // Allowlist kept intentionally narrow (not a blanket env passthrough
+        // like the `claude` CLI spawn), but must include what Windows
+        // CPython needs to start at all: `SystemRoot`/`TEMP`/`TMP` for
+        // random-seed and winsock init, `COMSPEC`/`PATHEXT` for subprocess
+        // and executable resolution, `APPDATA`/`LOCALAPPDATA` for anything
+        // Python or its deps touch under the user profile. See Windows
+        // parity audit finding #4. `SystemRoot` and `SYSTEMROOT` are both
+        // listed since Windows env var lookups are case-insensitive but
+        // `std::env::var` here is not, and different tools have historically
+        // written either casing.
+        for var in [
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "SystemRoot",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "COMSPEC",
+            "PATHEXT",
+            "APPDATA",
+            "LOCALAPPDATA",
+        ] {
             if let Ok(v) = std::env::var(var) {
                 command.env(var, v);
             }
         }
+        crate::procutil::suppress_console_window(&mut command);
 
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
