@@ -26,6 +26,19 @@ from mnemos_worker.capture.wav_writer import ChunkedWavWriter
 LEVEL_INTERVAL_S = 0.1
 CHUNK_INTERVAL_S = 0.5
 READ_FRAMES = 1600  # ~100ms at 16kHz; scaled to the source rate internally
+# TODO(Windows parity audit finding #8): mic and loopback are read
+# sequentially on one thread below, and READ_FRAMES is passed straight to
+# devices running at their native rate (typically 48kHz, not 16kHz), so this
+# is likely closer to ~33ms per read than the "~100ms" the constant's name
+# implies. Both need real Windows hardware to measure and fix correctly —
+# not guessed here.
+
+# Finding #17: mirrors the mac sidecar's silence-detection threshold/duration
+# exactly (`noSignalDbThreshold`/`noSignalWarningSeconds`,
+# swift/mnemos-audio/Sources/mnemos-audio/main.swift:24-25) so a muted/
+# wrong-device mic warns identically on both platforms.
+NO_SIGNAL_DB_THRESHOLD = -60.0
+NO_SIGNAL_WARNING_SECONDS = 30.0
 
 
 class AudioStream(Protocol):
@@ -64,6 +77,15 @@ class WindowsCapture:
         self._started_evt = threading.Event()
         self._started_at_ms: int | None = None
         self._thread: threading.Thread | None = None
+        # Finding #7: a failed `_open_streams()` used to still set
+        # `_started_evt` to a "success" state, so `start()` returned
+        # normally and the caller believed recording had begun. This is the
+        # failure signal `_run` sets instead — `start()` re-raises it.
+        self._start_error: Exception | None = None
+        # Finding #17 — running silence duration/warned-once state for the
+        # mic stream, checked every read (see `_track_mic_silence`).
+        self._mic_silence_start: float | None = None
+        self._mic_warned = False
 
     def start(self, timeout: float = 5.0) -> int:
         self._thread = threading.Thread(
@@ -72,6 +94,10 @@ class WindowsCapture:
         self._thread.start()
         if not self._started_evt.wait(timeout=timeout):
             raise TimeoutError("capture thread did not signal start in time")
+        if self._start_error is not None:
+            # Finding #7: surface the real failure instead of returning
+            # success for a recording that captured nothing.
+            raise self._start_error
         assert self._started_at_ms is not None
         return self._started_at_ms
 
@@ -97,8 +123,12 @@ class WindowsCapture:
         try:
             streams = self._open_streams()
         except OSError as exc:
+            # Finding #7: signal failure through `_started_evt` instead of a
+            # fake success — `start()` re-raises `_start_error`, so
+            # `CaptureManager.start_capture` returns a real JSON-RPC error
+            # rather than reporting a recording that captures nothing.
             self._emit("error", error_kind=classify_wasapi_error(exc), message=str(exc))
-            self._started_at_ms = int(time.time() * 1000)
+            self._start_error = exc
             self._started_evt.set()
             self._mic_writer.close()
             self._system_writer.close()
@@ -112,12 +142,27 @@ class WindowsCapture:
         last_chunk = 0.0
         try:
             while not self._should_exit.is_set():
-                if self._paused.is_set():
-                    time.sleep(0.05)
-                    continue
-
+                # Finding #16: always read (and resample) both streams every
+                # iteration, paused or not — this is what actually drains the
+                # WASAPI ring buffer. Only *whether we act on the frames*
+                # depends on pause state, mirroring the mac sidecar's Pause
+                # (taps/streams keep running, buffers are dropped;
+                # swift/mnemos-audio/Sources/mnemos-audio/main.swift:377,434,
+                # 554-557). Previously this loop stopped reading entirely
+                # while paused, letting the ring buffer overrun so resume
+                # wrote back a burst of stale audio
+                # (`exception_on_overflow=False`, see `_PyAudioStreamAdapter`
+                # below).
                 mic_pcm = self._read_and_resample(streams.mic)
                 system_pcm = self._read_and_resample(streams.system)
+
+                if self._paused.is_set():
+                    continue
+
+                mic_db = rms_dbfs(mic_pcm)
+                system_db = rms_dbfs(system_pcm)
+                self._track_mic_silence(mic_db)
+
                 self._mic_writer.append(mic_pcm)
                 self._system_writer.append(system_pcm)
 
@@ -126,8 +171,8 @@ class WindowsCapture:
                     last_level = now
                     self._emit(
                         "level",
-                        mic_db=rms_dbfs(mic_pcm),
-                        system_db=rms_dbfs(system_pcm),
+                        mic_db=mic_db,
+                        system_db=system_db,
                     )
                 if now - last_chunk >= CHUNK_INTERVAL_S:
                     last_chunk = now
@@ -162,6 +207,31 @@ class WindowsCapture:
     def _read_and_resample(self, stream: AudioStream) -> bytes:
         raw = stream.read(READ_FRAMES)
         return resample_to_16k_mono(raw, stream.sample_rate, stream.channels)
+
+    def _track_mic_silence(self, mic_db: float) -> None:
+        """Finding #17: no `no_mic_signal` warning existed on Windows at
+        all. Mirrors the mac sidecar's `trackSilence`
+        (swift/mnemos-audio/Sources/mnemos-audio/main.swift:488-499) —
+        tracks how long the mic has been below `NO_SIGNAL_DB_THRESHOLD` and
+        emits a `warning` event (once, until the level recovers) after
+        `NO_SIGNAL_WARNING_SECONDS`. Uses `warning_kind` (not `kind`,
+        already the event's own top-level discriminant) — the field name
+        `capture::capture_event_from_notification` (Rust side) expects.
+        """
+        if mic_db < NO_SIGNAL_DB_THRESHOLD:
+            if self._mic_silence_start is None:
+                self._mic_silence_start = time.monotonic()
+            elapsed = time.monotonic() - self._mic_silence_start
+            if not self._mic_warned and elapsed >= NO_SIGNAL_WARNING_SECONDS:
+                self._mic_warned = True
+                self._emit(
+                    "warning",
+                    warning_kind="no_mic_signal",
+                    message=f"no signal for {int(NO_SIGNAL_WARNING_SECONDS)}s",
+                )
+        else:
+            self._mic_silence_start = None
+            self._mic_warned = False
 
 
 def open_wasapi_streams() -> StreamPair:
