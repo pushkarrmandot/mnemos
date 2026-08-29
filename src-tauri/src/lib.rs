@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod logging;
 pub mod memory;
 pub mod metrics;
+pub mod procutil;
 pub mod state;
 
 use tauri::Manager;
@@ -91,6 +92,52 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
         .events(collect_events![])
 }
 
+/// Resolves the Python worker's working directory at runtime instead of
+/// baking in a compile-time developer path.
+///
+/// TODO(packaging): this only fixes the "runs from a built binary anywhere
+/// on disk, with `src-python/` copied alongside it" case — it does NOT wire
+/// up real production packaging. A proper fix still needs a bundled Python
+/// interpreter shipped via `externalBin`/`resources` in `tauri.conf.json`
+/// (LLD-02 §3), which is a much larger effort requiring testing against an
+/// actual built bundle. Until that lands, anyone who copies the built
+/// executable without also copying `src-python/` next to it (in the layout
+/// this function expects) still gets a worker that fails to start — this
+/// change does not claim to solve that; it only stops the binary from
+/// hard-coding this machine's absolute source path (Windows parity audit
+/// finding #9).
+///
+/// Release layout: `<exe_dir>/src-python`, i.e. `src-python/` copied next to
+/// the built executable (sibling directory, not a subdirectory of it).
+/// Debug layout: falls back to `$CARGO_MANIFEST_DIR/../src-python` (the
+/// dev-tree layout `cargo tauri dev` runs from) if the sibling directory
+/// isn't found next to the dev binary (e.g. `target/debug/`).
+fn worker_cwd() -> Result<std::path::PathBuf, AppError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::internal(format!("resolve current_exe: {e}")))?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| AppError::internal("current_exe has no parent directory"))?;
+    let sibling = exe_dir.join("src-python");
+    if sibling.is_dir() {
+        return Ok(sibling);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+        if dev_path.is_dir() {
+            return Ok(dev_path);
+        }
+    }
+
+    // Neither layout matched. Return the sibling-of-exe path anyway (rather
+    // than erroring here) so the failure surfaces as the worker's normal
+    // spawn-failure/restart-backoff path with a clear "not found" error,
+    // instead of a distinct code path here.
+    Ok(sibling)
+}
+
 /// Dev-mode worker config: a `python3` on PATH running `src-python/` in
 /// place. Production packaging (a bundled interpreter baked in by the Tauri
 /// sidecar bundler, per LLD-02 §3) is not wired up yet — no bundler config
@@ -98,7 +145,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
 /// status" for why that's deferred.
 fn worker_config() -> Result<crate::ipc::python::SupervisorConfig, AppError> {
     let python_bin = std::path::PathBuf::from(if cfg!(windows) { "python" } else { "python3" });
-    let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+    let cwd = worker_cwd()?;
     let state_dir = crate::fs::paths::state_dir()?;
     #[allow(unused_mut)]
     let mut cfg = crate::ipc::python::SupervisorConfig::new(python_bin, cwd, state_dir);

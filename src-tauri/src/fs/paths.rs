@@ -8,19 +8,40 @@ use regex_lite::Regex;
 
 use crate::error::AppError;
 
-/// `~/Mnemos` — the app's single data root, overridable via `$MNEMOS_HOME`
-/// (LLD-08 §4's `--data-dir` sketch: "defaults to `$MNEMOS_HOME` env var,
-/// then `~/Mnemos/`"). The main app never sets this; `mnemos-mcp-server`'s
+/// `~/Mnemos` on macOS/Linux, `%LOCALAPPDATA%\Mnemos` on Windows — the app's
+/// single data root, overridable via `$MNEMOS_HOME` (LLD-08 §4's
+/// `--data-dir` sketch: "defaults to `$MNEMOS_HOME` env var, then
+/// `~/Mnemos/`"). The main app never sets this; `mnemos-mcp-server`'s
 /// `--data-dir` flag does, by setting the env var once at startup before
 /// any path is resolved — letting both binaries share one path resolver
 /// and letting integration tests point either one at a temp directory
-/// without touching the real `~/Mnemos`.
+/// without touching the real data root.
+///
+/// Windows uses `%LOCALAPPDATA%` rather than `%USERPROFILE%` (Windows parity
+/// audit finding #20): on machines with OneDrive Known-Folder-Redirection
+/// enabled for the profile root — common on managed corporate Windows — a
+/// `%USERPROFILE%\Mnemos` data root would sit inside a cloud-synced,
+/// Files-On-Demand folder, and OneDrive's placeholder/locking behavior is a
+/// known SQLite corruption risk. `%LOCALAPPDATA%` is never
+/// redirection-synced by OneDrive and is the conventional home for
+/// per-machine app state on Windows.
 pub fn data_root() -> Result<PathBuf, AppError> {
     if let Some(over) = std::env::var_os("MNEMOS_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(over));
     }
-    let home = home_dir().ok_or_else(|| AppError::internal("no home directory"))?;
-    Ok(home.join("Mnemos"))
+    #[cfg(windows)]
+    {
+        let local_appdata = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| AppError::internal("no LOCALAPPDATA directory"))?;
+        return Ok(local_appdata.join("Mnemos"));
+    }
+    #[cfg(not(windows))]
+    {
+        let home = home_dir().ok_or_else(|| AppError::internal("no home directory"))?;
+        Ok(home.join("Mnemos"))
+    }
 }
 
 /// `~/Mnemos/logs`
@@ -173,13 +194,11 @@ pub fn system_wav_path(conversation_id: &str) -> Result<PathBuf, AppError> {
     Ok(conversation_dir(conversation_id)?.join("system.wav"))
 }
 
+// Only used on macOS/Linux now — Windows resolves its data root from
+// `%LOCALAPPDATA%` directly in `data_root()` above (finding #20).
+#[cfg(not(windows))]
 fn home_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
-    let var = "HOME";
-    #[cfg(windows)]
-    let var = "USERPROFILE";
-
-    std::env::var_os(var)
+    std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
 }

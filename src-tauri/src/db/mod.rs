@@ -6,7 +6,6 @@ pub mod pending_deletes;
 pub mod service;
 
 use std::path::Path;
-use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -41,18 +40,20 @@ pub struct DbPools {
 }
 
 fn base_opts(db_path: &Path) -> Result<SqliteConnectOptions, AppError> {
-    let url = format!("sqlite://{}", db_path.display());
-    SqliteConnectOptions::from_str(&url)
-        .map_err(|e| AppError::storage(format!("invalid db url: {e}")))
-        .map(|opts| {
-            opts.create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal)
-                .synchronous(SqliteSynchronous::Normal)
-                .busy_timeout(Duration::from_secs(5))
-                .foreign_keys(true)
-                .pragma("cache_size", "-64000")
-                .pragma("temp_store", "MEMORY")
-        })
+    // `SqliteConnectOptions::new().filename(..)` takes a native path
+    // directly, unlike the old `format!("sqlite://{}", db_path.display())`
+    // + `from_str` approach, which mis-parses a Windows drive-letter path
+    // (`C:\Users\...`) as a URL authority. See Windows parity audit finding
+    // #3.
+    Ok(SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .foreign_keys(true)
+        .pragma("cache_size", "-64000")
+        .pragma("temp_store", "MEMORY"))
 }
 
 /// Opens both pools against `db_path`, runs pending migrations on the write

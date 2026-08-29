@@ -61,15 +61,15 @@ tauri-plugin-window-state = "2.4.1"
 # in the codebase; rustls-only so the Tauri bundler never needs a system
 # OpenSSL toolchain.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
     "macros",
     "migrate",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

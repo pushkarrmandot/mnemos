@@ -48,7 +48,17 @@ impl FrameReader {
     }
 }
 
-#[cfg(test)]
+// Every test here drives `FrameReader` over a real `/bin/sh -c <script>`
+// child process. That's POSIX-only — Windows has no `/bin/sh` — so the
+// whole module is `#[cfg(unix)]`-gated rather than per-test: none of these
+// tests would exercise anything Windows-specific if ported (they test
+// `FrameReader`'s line-parsing, not process spawning itself), so a real
+// Windows port belongs in the separate WASAPI/behavioral-parity follow-up,
+// not a mechanical `#[cfg(unix)]` gate that would leave them silently
+// unrun. Gating here only stops Windows CI from failing to build/run the
+// test binary over an intentionally-POSIX-only test harness. See Windows
+// parity audit finding #2.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::process::Command;

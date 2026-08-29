@@ -368,6 +368,7 @@ impl ClaudeRunner {
             // PROVISIONAL courtesy attribution header (LLD-07 §4.2);
             // harmless if the CLI doesn't recognize it.
             .env("CLAUDE_CODE_ENTRYPOINT", "mnemos");
+        crate::procutil::suppress_console_window(&mut command);
 
         let mut child = match command.spawn() {
             Ok(c) => c,
@@ -675,6 +676,10 @@ mod tests {
         path
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn happy_path_completes_with_text_and_usage() {
         let dir = tempfile::tempdir().unwrap();
@@ -722,6 +727,10 @@ cat >/dev/null
         Box::new(runner).dispose().await.unwrap();
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn three_consecutive_malformed_lines_trip_stream_corrupt() {
         let dir = tempfile::tempdir().unwrap();
@@ -774,6 +783,10 @@ cat >/dev/null
         Box::new(runner).dispose().await.unwrap();
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_turn_terminates_the_stream_and_kills_the_child() {
         let dir = tempfile::tempdir().unwrap();
@@ -832,6 +845,10 @@ printf '%s\n' '{"is_error":false,"stop_reason":"end_turn","session_id":"t","usag
         );
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_turn_on_a_stale_turn_id_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
@@ -867,6 +884,10 @@ cat >/dev/null
         Box::new(runner).dispose().await.unwrap();
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn start_does_not_block_when_the_process_prints_nothing_up_front() {
         // Regression test for the deadlock this wave found: `start()` must
@@ -885,6 +906,10 @@ cat >/dev/null
         Box::new(runner).dispose().await.unwrap();
     }
 
+    // POSIX-only: spawns a real `#!/bin/sh` script and relies on the
+    // exec-bit + shebang interpretation to run it directly. See
+    // Windows parity audit finding #2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn dead_process_surfaces_as_a_runner_error_on_first_prompt() {
         let dir = tempfile::tempdir().unwrap();
