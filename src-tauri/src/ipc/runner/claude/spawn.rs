@@ -43,6 +43,28 @@ use crate::ipc::runner::mcp_shared::MCP_SERVER_NAME;
 /// Manual PATH scan — one binary lookup does not justify the `which` crate
 /// dependency. `configured_path` is the (not-yet-built) Settings override
 /// from LLD-07 §10 OQ3; `None` in v1 since no such Settings surface exists.
+///
+/// Windows parity audit finding #18: extension candidates are now
+/// `PATHEXT`-aware (standard Windows executable-search semantics) instead
+/// of the fixed `.exe`/`.cmd` list — a `.ps1`/`.bat`/other shimmed `claude`
+/// install (e.g. from a package manager whose shim isn't one of those two)
+/// was previously missed outright.
+///
+/// **Unresolved risk, not fixed here (finding #18):** if the resolved
+/// binary is a `.cmd` shim, spawning it via `std::process::Command` goes
+/// through `cmd.exe`'s batch-argument escaping, which — since the Rust
+/// 1.77 CVE fix — returns `InvalidInput` for arguments it can't safely
+/// escape. `build_argv` below can pass a full multi-line `--system-prompt`
+/// argument, which is exactly the shape that can trip this. No workaround
+/// is attempted: manually re-implementing cmd.exe quoting is a known
+/// injection-bug source and explicitly out of scope for this fix (see this
+/// wave's brief). This module's argv surface has no `--system-prompt-file`/
+/// stdin alternative today — `build_argv` always passes `--system-prompt`
+/// as a literal argument when `opts.system_prompt` is `Some` — so if this
+/// is ever hit in practice, verify against a real `claude.cmd` on real
+/// Windows before choosing a fix (add a file/stdin-based flag to the CLI's
+/// actual argument surface if one exists, rather than hand-rolling escaping
+/// here).
 pub fn find_claude_binary(configured_path: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = configured_path {
         let path = PathBuf::from(p);
@@ -50,13 +72,13 @@ pub fn find_claude_binary(configured_path: Option<&str>) -> Option<PathBuf> {
     }
 
     let path_var = std::env::var_os("PATH")?;
-    let candidates: &[&str] = if cfg!(windows) {
-        &["claude.exe", "claude.cmd", "claude"]
+    let candidates: Vec<String> = if cfg!(windows) {
+        windows_candidates("claude")
     } else {
-        &["claude"]
+        vec!["claude".to_string()]
     };
     for dir in std::env::split_paths(&path_var) {
-        for candidate in candidates {
+        for candidate in &candidates {
             let full = dir.join(candidate);
             if full.is_file() {
                 return Some(full);
@@ -64,6 +86,38 @@ pub fn find_claude_binary(configured_path: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `PATHEXT`-aware candidate list for `stem` on Windows: `stem` itself
+/// (covers an already-extensioned name, and matches `is_file()` even with
+/// no extension) followed by `stem<ext>` for each `PATHEXT` entry in order —
+/// standard Windows executable-search semantics (`cmd.exe`/`CreateProcess`'s
+/// own resolution order). Falls back to a sane default list when `PATHEXT`
+/// is unset (e.g. a stripped-down spawn environment) rather than silently
+/// searching nothing beyond `.exe`.
+#[cfg(windows)]
+fn windows_candidates(stem: &str) -> Vec<String> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_PATHEXT.to_string());
+    let mut out = vec![stem.to_string()];
+    for ext in pathext.split(';') {
+        let ext = ext.trim();
+        if ext.is_empty() {
+            continue;
+        }
+        let ext = if let Some(stripped) = ext.strip_prefix('.') {
+            stripped
+        } else {
+            ext
+        };
+        out.push(format!("{stem}.{ext}"));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn windows_candidates(stem: &str) -> Vec<String> {
+    vec![stem.to_string()]
 }
 
 pub fn binary_missing_error() -> AppError {

@@ -36,12 +36,22 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        // Windows parity audit finding #13: `0600` has no direct POSIX-mode
+        // analog on Windows — the equivalent would be restricting the
+        // file's ACL to the current user, which needs either a new crate
+        // dependency (not added unprompted for this) or hand-rolled
+        // `windows-sys` ACL/SID calls this wave didn't have a Windows
+        // machine to verify against. Left as an honest, explicitly-flagged
+        // gap rather than a silently-skipped one: transcripts/extractions/
+        // summaries land with default (user-profile-inherited) ACLs on
+        // Windows today, same class of gap as finding #17's "no warning
+        // event exists" — not attempted, not guessed.
         let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
 
-    if let Err(e) = fs::rename(&tmp, path) {
+    if let Err(e) = rename_with_retry(&tmp, path) {
         let _ = fs::remove_file(&tmp); // best-effort cleanup
         return Err(e.into());
     }
@@ -55,6 +65,48 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+/// Windows parity audit finding #14: `fs::rename` over an existing
+/// destination is a `MoveFileEx` replace on Windows, which can return a
+/// sharing violation if another process (antivirus scan, a reader) has the
+/// target open at that exact instant — transient, unlike the always-succeeds
+/// `rename(2)` on macOS/Linux. A handful of short, increasing-backoff
+/// retries covers that. Same `raw_os_error()` codes as
+/// `db::pending_deletes::remove_dir_all_with_retry` (`ERROR_SHARING_VIOLATION`
+/// / `ERROR_LOCK_VIOLATION`), same reasoning for checking the raw code
+/// rather than `ErrorKind`.
+#[cfg(windows)]
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const MAX_ATTEMPTS: u32 = 5;
+
+    let mut attempt: u32 = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if attempt + 1 < MAX_ATTEMPTS
+                    && matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Unix `rename(2)` over an existing destination always succeeds — no retry
+/// needed (see this fn's doc comment above for the Windows-only reasoning).
+#[cfg(not(windows))]
+fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
 }
 
 pub fn atomic_write_json<T: Serialize>(path: &Path, val: &T) -> Result<(), AppError> {

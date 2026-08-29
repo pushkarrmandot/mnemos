@@ -2077,6 +2077,11 @@ impl StorageService for SqliteStorageService {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        // Windows parity audit finding #13: same honest gap as
+        // `fs::atomic::atomic_write`'s tmp-file open — no Windows ACL
+        // restriction is attempted here either, for the same reasons (see
+        // that function's comment). Transcript chunks land with default
+        // ACLs on Windows.
         let mut f = opts.open(&path)?;
         writeln!(f, "{line_json}")?;
         f.sync_all()?;

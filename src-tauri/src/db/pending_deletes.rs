@@ -260,11 +260,7 @@ async fn run_fs_phase(pools: &DbPools, row: &PendingDeleteRow) -> Result<(), App
             )))
         }
     };
-    match std::fs::remove_dir_all(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
+    remove_dir_all_with_retry(&path)?;
     let id = row.id;
     with_write_tx(&pools.write, move |tx| {
         Box::pin(async move {
@@ -282,6 +278,70 @@ async fn run_fs_phase(pools: &DbPools, row: &PendingDeleteRow) -> Result<(), App
         })
     })
     .await
+}
+
+/// Windows parity audit finding #12: on macOS, unlinking an open `mic.wav`
+/// (still held by the worker's live-transcription reader,
+/// `jobs/live_transcription.py:199`, or `ChunkedWavWriter`,
+/// `capture/wav_writer.py:32`) just succeeds; on Windows it's
+/// `ERROR_SHARING_VIOLATION` (raw OS error 32) — a hard error, not a
+/// transient one Rust's `ErrorKind` maps to anything specific pre-1.83's
+/// `ResourceBusy` (not relied on here — this checks `raw_os_error()`
+/// directly, which is stable and precise). A handful of short,
+/// increasing-backoff retries covers the common case where the handle
+/// closes within a few hundred ms (e.g. the reader thread finishing its
+/// current read); if it never does, this still returns the error and the
+/// existing `pending_deletes` per-row retry-on-next-boot fallback (its
+/// `attempts` counter, driven by `resume_pending_deletes`) is unchanged —
+/// this only makes the *immediate* attempt less brittle, not a replacement
+/// for that safety net. Unix behavior (only `NotFound` treated as success)
+/// is unchanged.
+#[cfg(windows)]
+fn remove_dir_all_with_retry(path: &std::path::Path) -> Result<(), AppError> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const MAX_ATTEMPTS: u32 = 5;
+
+    let mut attempt: u32 = 0;
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e)
+                if attempt + 1 < MAX_ATTEMPTS
+                    && matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                    ) =>
+            {
+                attempt += 1;
+                tracing::warn!(
+                    path = %path.display(),
+                    attempt,
+                    "pending_delete.remove_dir_all_sharing_violation_retry"
+                );
+                // Brief, bounded synchronous sleep — this fn is already a
+                // blocking `std::fs` call in an async caller (unchanged from
+                // before this fix), and the total worst-case wait here
+                // (~1s) is small next to the per-row DB retry this backs up.
+                std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Unix: only `NotFound` is treated as success (unchanged from before this
+/// fix) — no sharing-violation retry needed there (see this fn's Windows
+/// counterpart's doc comment above for why it's Windows-specific).
+#[cfg(not(windows))]
+fn remove_dir_all_with_retry(path: &std::path::Path) -> Result<(), AppError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn delete_row(pool: &SqlitePool, id: i64) -> Result<(), AppError> {

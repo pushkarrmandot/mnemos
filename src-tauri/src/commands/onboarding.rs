@@ -306,12 +306,21 @@ pub async fn onboarding_request_screen_permission(
     result
 }
 
+/// Windows parity audit finding #10: `granted` used to also count
+/// `NotApplicable` (Windows always reports this — no verified proactive
+/// permission check exists there, see `mac_permissions` above), so Windows
+/// permission-grant rates read as a false 100%. `not_applicable` is now its
+/// own bucket instead of being folded into `granted` — this is additive
+/// (new field, `granted` narrowed to only its literal meaning) rather than
+/// repurposing the existing field, so nothing downstream reading `granted`
+/// silently changes meaning for a platform/build that never reports
+/// `NotApplicable` (mac).
 fn track_permission_result(
     state: &State<'_, AppState>,
     kind: &'static str,
     result: &Result<PermissionState, AppError>,
 ) {
-    let Ok(granted) = result else { return };
+    let Ok(state_value) = result else { return };
     state.metrics.track(
         crate::metrics::events::ONBOARDING_PERMISSION_RESULT,
         crate::metrics::properties::EventProperties::from([
@@ -322,8 +331,15 @@ fn track_permission_result(
             (
                 "granted",
                 crate::metrics::properties::PropertyValue::Bool(matches!(
-                    granted,
-                    PermissionState::Granted | PermissionState::NotApplicable
+                    state_value,
+                    PermissionState::Granted
+                )),
+            ),
+            (
+                "not_applicable",
+                crate::metrics::properties::PropertyValue::Bool(matches!(
+                    state_value,
+                    PermissionState::NotApplicable
                 )),
             ),
         ]),
@@ -357,24 +373,34 @@ pub fn onboarding_open_system_settings(pane: SettingsPane) {
     #[cfg(target_os = "macos")]
     let spawn_result = std::process::Command::new("open").arg(url).spawn();
 
-    // PROVISIONAL — no Windows machine to verify these URIs against, but the
-    // failure mode of a wrong/rejected URI is just "Settings doesn't open,"
-    // never a crash, so shipping it is safe.
+    // Windows parity audit finding #11: `ms-settings:privacy-microphone` is
+    // verified correct and stays. There is no Windows Settings pane
+    // equivalent to macOS's Screen Recording TCC gate at all (Windows has
+    // no such permission concept) — the old `ms-settings:privacy` guess
+    // pointed at nothing meaningful, and per finding #10 this arm is
+    // unreachable in practice anyway (`onboarding_check_permissions`
+    // reports `NotApplicable` on Windows, never `Denied`, so nothing calls
+    // this with `ScreenRecording` there). No-op rather than guessing
+    // another URI that can't be verified without a real Windows machine.
     #[cfg(target_os = "windows")]
     let url = match pane {
-        SettingsPane::Microphone => "ms-settings:privacy-microphone",
-        SettingsPane::ScreenRecording => "ms-settings:privacy",
+        SettingsPane::Microphone => Some("ms-settings:privacy-microphone"),
+        SettingsPane::ScreenRecording => None,
     };
     #[cfg(target_os = "windows")]
-    let spawn_result = {
+    let spawn_result = url.map(|url| {
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "start", "", url]);
         crate::procutil::suppress_console_window(&mut command);
         command.spawn()
-    };
+    });
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     if let Err(e) = spawn_result {
+        tracing::warn!(error = %e, "onboarding.open_system_settings_failed");
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(Err(e)) = spawn_result {
         tracing::warn!(error = %e, "onboarding.open_system_settings_failed");
     }
 }

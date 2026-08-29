@@ -11,10 +11,18 @@
 //! `pause`/`resume` were added post-v1-wave (debug-session patch): the
 //! capture-side transport for both (`CaptureEvent::Level`, Swift/WASAPI
 //! `pause`/`resume`) already existed from W7a — only the Tauri command layer
-//! and Channel forwarding were missing. macOS-only for now (mirrors the
-//! rest of this file's `#[cfg(target_os = "macos")]` capture-watch path);
-//! Windows/WASAPI level forwarding is a real gap, not silently stubbed.
-//! Diarization remains out of v1 scope.
+//! and Channel forwarding were missing.
+//!
+//! Windows parity audit findings #6/#7: `CAPTURE_EVENT_TOPIC` is now
+//! subscribed to on the non-mac branch of `start_platform_capture` too, the
+//! same way the mac branch drains its sidecar's event channel — `Level`
+//! feeds this session's `level_tx` (what `subscribe_mic_level` reads from),
+//! `Warning` is log-only (mirrors mac), and `Error`/`Stopped` (Windows has
+//! no separate process to crash-exit the way the mac sidecar does, so a
+//! `Stopped` the Rust side didn't itself request by calling `StopCapture`
+//! first is just as terminal as an `Error` — see `capture::CaptureEvent`'s
+//! doc comment) both route through `handle_capture_failure`, no longer
+//! `#[cfg(target_os = "macos")]`-gated. Diarization remains out of v1 scope.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +35,6 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
-#[cfg(target_os = "macos")]
 use crate::capture::CaptureEvent;
 use crate::db::models::{Conversation, ConversationStatus, NewConversation, PipelineStep};
 use crate::db::service::StorageService;
@@ -107,7 +114,9 @@ struct ActiveSession {
     level_forward_task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
     sidecar: Option<crate::ipc::swift::SidecarControl>,
-    #[cfg(target_os = "macos")]
+    /// Drains the platform capture-event stream (mac sidecar events or, per
+    /// Windows parity audit finding #6, the worker's `CAPTURE_EVENT_TOPIC`
+    /// notifications) for this session. No longer mac-only.
     capture_watch_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -288,7 +297,6 @@ pub async fn start_recording(
         level_tx.clone(),
     )
     .await;
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let (sidecar, capture_watch_task) = match start_result {
         Ok(parts) => parts,
         Err(err) => {
@@ -299,6 +307,10 @@ pub async fn start_recording(
             return Err(err);
         }
     };
+    // `sidecar`'s type is `Option<()>` on non-mac (see `SidecarParts`) —
+    // nothing to store there, only `capture_watch_task` is used below.
+    #[cfg(not(target_os = "macos"))]
+    let _ = &sidecar;
 
     if let Err(err) = state
         .python
@@ -332,7 +344,6 @@ pub async fn start_recording(
             level_forward_task: None,
             #[cfg(target_os = "macos")]
             sidecar,
-            #[cfg(target_os = "macos")]
             capture_watch_task,
         },
     );
@@ -433,9 +444,12 @@ async fn start_platform_capture(
     Ok((Some(handle.control), Some(watch_task)))
 }
 
-/// Gap #6 (LLD-03 §9 failure modes #1-#3). Called from the mac capture-watch
-/// task the moment a terminal `CaptureEvent::Error`/`Exited` arrives — there
-/// is no user "Stop" click driving this, so it reconstructs the same tail
+/// Gap #6 (LLD-03 §9 failure modes #1-#3). Called from the platform
+/// capture-watch task (mac sidecar events, or — per Windows parity audit
+/// finding #6 — the Windows `CAPTURE_EVENT_TOPIC` watch task above) the
+/// moment a terminal event arrives (`Error`/`Exited` on mac,
+/// `Error`/`Stopped` on Windows) — there is no user "Stop" click driving
+/// this, so it reconstructs the same tail
 /// `stop_recording`/`recover_interrupted_recording` run: emit the UI-visible
 /// warning first (so the toast lands *before* the conversation disappears
 /// from "currently recording"), tear down the session, then either hand the
@@ -452,7 +466,6 @@ async fn start_platform_capture(
 /// soon" banner vs. a terminal "here's what we saved" toast), so keeping
 /// them separate avoids a confusing double notification for the same
 /// underlying disk-full condition.
-#[cfg(target_os = "macos")]
 async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, message: &str) {
     let state = app.state::<AppState>();
 
@@ -482,11 +495,26 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
     if let Some(task) = &session.level_forward_task {
         task.abort();
     }
+    #[cfg(target_os = "macos")]
     if let Some(sidecar) = &session.sidecar {
         // Best-effort: the process may already be gone (that's the whole
         // point of `Exited`), or unresponsive (`Error`). Either way there's
         // nothing more useful to do than try.
         let _ = sidecar.stop().await;
+    }
+    // Windows: the capture thread has already exited by the time this event
+    // reached us (that's what makes `Error`/`Stopped` terminal here), but
+    // `CaptureManager`'s worker-side `_active` slot doesn't know that until
+    // `stop_capture` is called — best-effort, same reasoning as the mac
+    // `sidecar.stop()` above.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state
+            .python
+            .send(crate::ipc::python::StopCapture {
+                conversation_id: conv_id.to_string(),
+            })
+            .await;
     }
     let _ = state
         .python
@@ -548,14 +576,29 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
     ));
 }
 
+/// Windows parity audit findings #6/#7: subscribes to `CAPTURE_EVENT_TOPIC`
+/// (`ipc::python::WorkerSupervisor::subscribe`, the same mechanism
+/// `subscribe_transcript` already uses for `LIVE_TRANSCRIPT_CHUNK_TOPIC`)
+/// and drains it for this conversation, mirroring the mac branch's sidecar
+/// event-channel watch task above: `Level` publishes onto `level_tx` (what
+/// `subscribe_mic_level` feeds the React level meter from — previously
+/// ignored entirely on this branch), `Warning` is log-only (matches mac's
+/// non-fatal `no_mic_signal`/etc. handling), and `Error`/`Stopped` are both
+/// terminal — `capture::CaptureEvent`'s doc comment already anticipated
+/// this: Windows has no separate process to `Exited`, so the capture
+/// thread's own `Stopped` (emitted from `_run`'s `finally` on any exit, not
+/// just a clean one) is exactly as terminal as an `Error`. `stop_recording`
+/// aborts this task *before* sending `StopCapture` on a normal user-driven
+/// stop, so the ordinary "stopped because Stop was clicked" path never
+/// reaches this handler.
 #[cfg(not(target_os = "macos"))]
 async fn start_platform_capture(
-    _app: AppHandle,
+    app: AppHandle,
     state: &State<'_, AppState>,
     conv_id: &str,
     mic_path: &Path,
     system_path: &Path,
-    _level_tx: broadcast::Sender<(f32, f32)>,
+    level_tx: broadcast::Sender<(f32, f32)>,
 ) -> Result<SidecarParts, AppError> {
     state
         .python
@@ -566,7 +609,60 @@ async fn start_platform_capture(
             mic_device_id: None,
         })
         .await?;
-    Ok((None, None))
+
+    let mut events = state
+        .python
+        .subscribe(crate::ipc::python::CAPTURE_EVENT_TOPIC);
+    let conv_id_owned = conv_id.to_string();
+    let watch_task = tokio::spawn(async move {
+        loop {
+            let value = match events.recv().await {
+                Ok(v) => v,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            if value
+                .get("conversation_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(conv_id_owned.as_str())
+            {
+                continue;
+            }
+            let Some(event) = crate::capture::capture_event_from_notification(&value) else {
+                continue;
+            };
+            match event {
+                CaptureEvent::Level { mic_db, system_db } => {
+                    let _ = level_tx.send((mic_db, system_db));
+                }
+                CaptureEvent::Warning { kind, message } => {
+                    tracing::warn!(conv_id = %conv_id_owned, kind, message, "recording.capture_warning");
+                }
+                CaptureEvent::Error { kind, message } => {
+                    tracing::error!(conv_id = %conv_id_owned, kind, message, "recording.capture_error");
+                    handle_capture_failure(&app, &conv_id_owned, &kind, &message).await;
+                    return;
+                }
+                CaptureEvent::Stopped { .. } => {
+                    tracing::warn!(
+                        conv_id = %conv_id_owned,
+                        "recording.capture_stopped_unexpectedly"
+                    );
+                    handle_capture_failure(
+                        &app,
+                        &conv_id_owned,
+                        "capture_stopped_unexpectedly",
+                        "The recording thread stopped unexpectedly.",
+                    )
+                    .await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Ok((None, Some(watch_task)))
 }
 
 /// Forwards the worker's `live_transcript_chunk` broadcast (filtered to this
@@ -886,7 +982,10 @@ pub async fn stop_recording(
     if let Some(task) = session.warmup_forward_task.take() {
         task.abort();
     }
-    #[cfg(target_os = "macos")]
+    // Aborted before `stop_platform_capture` below sends `StopCapture` on
+    // Windows (or stops the sidecar on mac) so the normal "Stop was
+    // clicked" `Stopped`/`Exited` event never races into
+    // `handle_capture_failure` treating a clean stop as a failure.
     if let Some(task) = session.capture_watch_task.take() {
         task.abort();
     }
