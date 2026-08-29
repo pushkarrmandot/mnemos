@@ -12,7 +12,7 @@ function IntegrationsRoute() {
     <EmptyState
       body={t("empty.integrations.body")}
       heading={t("empty.integrations.heading")}
-      illustration="empty-project"
+      illustration="coming-soon"
     />
   );
 }

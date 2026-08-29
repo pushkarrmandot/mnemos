@@ -50,6 +50,13 @@
   /* ── Recording indicator (red dot only) ────────────────────────────────── */
   --recording: #d0433c;
 
+  /* ── Recording level-meter gradient (LevelMeter's waveform bars). Middle
+        stop is `--recording` itself, not a duplicate literal, so retinting
+        the recording color also retints the meter automatically. ────────── */
+  --waveform-gradient-1: #e7a85e;
+  --waveform-gradient-2: var(--recording);
+  --waveform-gradient-3: #7a4d9e;
+
   /* ── Icon colors (§17) ─────────────────────────────────────────────────── */
   --icon-primary: var(--text-primary);
   --icon-muted: var(--text-secondary);
@@ -57,8 +64,12 @@
   --icon-danger: var(--danger);
   --icon-success: var(--success);
 
-  /* ── Elevation (§5) — shadow is used for exactly two things: the floating
-        recording pane and toasts. Everything else layers backgrounds. ────── */
+  /* ── Elevation (§5) — shadow is used for surfaces that visually float over
+        the canvas: the floating recording pane, toasts, popovers (the scope
+        picker), and — deliberately widened here — chat message bubbles,
+        which otherwise read as flat as the page behind them (a bland-empty-
+        space complaint this fixed). Everything else still layers
+        backgrounds instead of reaching for a shadow. ─────────────────────── */
   --shadow-floating: 0 4px 20px rgba(0, 0, 0, 0.08);
 
   /* ── Type stacks (§3) ──────────────────────────────────────────────────── */
@@ -71,6 +82,7 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
 
   /* ── Raw motion scale (§6) ─────────────────────────────────────────────── */
@@ -100,8 +112,11 @@
   --space-reading-6: 48px;
 
   /* ── Shell geometry (SHELL_CHEATSHEET.md §2, DESIGN_SYSTEM.md §7) ──────── */
-  --nav-width: 240px;
-  --rail-width: 320px;
+  --nav-width: 208px;
+  /* Default/reset width only — the rail is drag-resizable (RightRail.tsx),
+     and remembers the user's own width via useUIStore's `railWidth`, which
+     starts from this same 380 (kept in sync by eye, not read at runtime). */
+  --rail-width: 380px;
 }
 
 [data-theme="dark"] {
@@ -134,6 +149,9 @@
   --info-bg: #1b2530;
 
   --recording: #e85a52;
+
+  --waveform-gradient-1: #f0b876;
+  --waveform-gradient-3: #9b6bc2;
 
   --shadow-floating: 0 4px 20px rgba(0, 0, 0, 0.4);
 }

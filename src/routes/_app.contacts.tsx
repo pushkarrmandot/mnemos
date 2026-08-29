@@ -8,5 +8,11 @@ export const Route = createFileRoute("/_app/contacts")({
 });
 
 function ContactsRoute() {
-  return <EmptyState heading={t("empty.contacts.heading")} illustration="empty-contacts" />;
+  return (
+    <EmptyState
+      body={t("empty.contacts.body")}
+      heading={t("empty.contacts.heading")}
+      illustration="coming-soon"
+    />
+  );
 }

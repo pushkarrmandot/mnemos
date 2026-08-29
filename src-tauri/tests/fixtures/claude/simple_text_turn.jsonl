@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","cwd":"/private/tmp","session_id":"scrubbed-session","model":"claude-haiku-4-5","permissionMode":"default"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":0.81},"session_id":"scrubbed-session"}
+{"type":"system","subtype":"thinking_tokens","estimated_tokens":5,"estimated_tokens_delta":5,"session_id":"scrubbed-session"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_scrubbed","role":"assistant","content":[{"type":"thinking","thinking":"The user wants OK only."}],"stop_reason":null},"session_id":"scrubbed-session"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_scrubbed","role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":null},"session_id":"scrubbed-session"}
+{"is_error":false,"duration_api_ms":2294,"num_turns":1,"stop_reason":"end_turn","session_id":"scrubbed-session","total_cost_usd":0.0172192,"usage":{"input_tokens":10,"cache_creation_input_tokens":7413,"cache_read_input_tokens":12212,"output_tokens":43},"subtype":"success","result":"OK","type":"result"}

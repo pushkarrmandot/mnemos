@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/private/tmp","session_id":"scrubbed-session","model":"totally-not-a-real-model","permissionMode":"default"}
+[claude-code:unrecognized_model] {"model":"totally-not-a-real-model","query_source":"sdk"}
+{"type":"assistant","message":{"id":"scrubbed","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"There's an issue with the selected model. It may not exist or you may not have access to it."}]},"session_id":"scrubbed-session","error":"model_not_found"}
+{"is_error":true,"duration_api_ms":0,"num_turns":1,"stop_reason":"stop_sequence","session_id":"scrubbed-session","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"subtype":"success","api_error_status":404,"result":"There's an issue with the selected model. It may not exist or you may not have access to it.","type":"result"}

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Baseline permissions for the main window. Grant additively — each wave adds only what its commands need.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "opener:default", "window-state:default"]
 }

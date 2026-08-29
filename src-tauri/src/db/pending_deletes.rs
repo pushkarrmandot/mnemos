@@ -21,7 +21,6 @@ pub struct PendingDeleteRow {
     pub id: i64,
     pub kind: String,
     pub target_id: String,
-    pub parent_id: Option<String>,
     #[allow(dead_code)]
     pub enqueued_at: i64,
     pub phase: String,
@@ -90,14 +89,19 @@ pub async fn enqueue_project_delete(pool: &SqlitePool, project_id: &str) -> Resu
     .await
 }
 
-/// Phase 0 (mark) for a conversation delete.
+/// Phase 0 (mark) for a conversation delete. No longer takes a `project_id`
+/// — `conversation_dir` is flat and keyed by id alone (`fs::paths`), so
+/// there is nothing project-scoped left to remember here. Dropping it also
+/// removes a real TOCTOU: the row used to snapshot `project_id` at
+/// `delete_conversation`'s read, outside of this transaction, so a
+/// concurrent `conversation_set_project` racing in between could commit a
+/// stale value and leave `run_fs_phase` looking in the wrong (renamed-away)
+/// directory at resume time — silently orphaning it.
 pub async fn enqueue_conversation_delete(
     pool: &SqlitePool,
-    project_id: &str,
     conversation_id: &str,
 ) -> Result<(), AppError> {
     let now = unix_now();
-    let project_id = project_id.to_string();
     let conversation_id = conversation_id.to_string();
     with_write_tx(pool, move |tx| {
         Box::pin(async move {
@@ -117,11 +121,10 @@ pub async fn enqueue_conversation_delete(
                 });
             }
             sqlx::query(
-                "INSERT INTO pending_deletes (kind, target_id, parent_id, enqueued_at, phase) \
-                 VALUES ('conversation', ?1, ?2, ?3, 'marked')",
+                "INSERT INTO pending_deletes (kind, target_id, enqueued_at, phase) \
+                 VALUES ('conversation', ?1, ?2, 'marked')",
             )
             .bind(&conversation_id)
-            .bind(&project_id)
             .bind(now)
             .execute(&mut **tx)
             .await
@@ -137,7 +140,7 @@ pub async fn enqueue_conversation_delete(
 /// phase is idempotent.
 pub async fn resume_pending_deletes(pools: &DbPools) -> Result<(), AppError> {
     let rows: Vec<PendingDeleteRow> = sqlx::query_as(
-        "SELECT id, kind, target_id, parent_id, enqueued_at, phase, error, last_attempt, attempts \
+        "SELECT id, kind, target_id, enqueued_at, phase, error, last_attempt, attempts \
          FROM pending_deletes ORDER BY id",
     )
     .fetch_all(&pools.read)
@@ -250,12 +253,7 @@ async fn run_sqlite_phase(pools: &DbPools, row: &PendingDeleteRow) -> Result<(),
 async fn run_fs_phase(pools: &DbPools, row: &PendingDeleteRow) -> Result<(), AppError> {
     let path = match row.kind.as_str() {
         "project" => paths::project_dir(&row.target_id)?,
-        "conversation" => {
-            let parent = row.parent_id.clone().ok_or_else(|| {
-                AppError::storage("conversation pending_delete row missing parent_id")
-            })?;
-            paths::conversation_dir(&parent, &row.target_id)?
-        }
+        "conversation" => paths::conversation_dir(&row.target_id)?,
         other => {
             return Err(AppError::storage(format!(
                 "unknown pending_delete kind: {other}"

@@ -8,8 +8,17 @@ use regex_lite::Regex;
 
 use crate::error::AppError;
 
-/// `~/Mnemos` — the app's single data root.
+/// `~/Mnemos` — the app's single data root, overridable via `$MNEMOS_HOME`
+/// (LLD-08 §4's `--data-dir` sketch: "defaults to `$MNEMOS_HOME` env var,
+/// then `~/Mnemos/`"). The main app never sets this; `mnemos-mcp-server`'s
+/// `--data-dir` flag does, by setting the env var once at startup before
+/// any path is resolved — letting both binaries share one path resolver
+/// and letting integration tests point either one at a temp directory
+/// without touching the real `~/Mnemos`.
 pub fn data_root() -> Result<PathBuf, AppError> {
+    if let Some(over) = std::env::var_os("MNEMOS_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(over));
+    }
     let home = home_dir().ok_or_else(|| AppError::internal("no home directory"))?;
     Ok(home.join("Mnemos"))
 }
@@ -29,9 +38,60 @@ pub fn backups_dir() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("backups"))
 }
 
+/// `~/Mnemos/state` — worker manifest + job-queue snapshots (LLD-02 §5.3, §6).
+pub fn state_dir() -> Result<PathBuf, AppError> {
+    Ok(data_root()?.join("state"))
+}
+
+/// `~/Mnemos/state/worker-manifest.json` (LLD-02 §5.3).
+pub fn worker_manifest_path() -> Result<PathBuf, AppError> {
+    Ok(state_dir()?.join("worker-manifest.json"))
+}
+
+/// `~/Mnemos/state/pending_jobs.json` — worker-written, replayed by the
+/// supervisor on restart (LLD-02 §6; reserved but unused by LLD-01/W4).
+pub fn pending_jobs_path() -> Result<PathBuf, AppError> {
+    Ok(state_dir()?.join("pending_jobs.json"))
+}
+
+/// `~/Mnemos/state/current_job.json` — the single in-flight job (LLD-02 §6).
+pub fn current_job_path() -> Result<PathBuf, AppError> {
+    Ok(state_dir()?.join("current_job.json"))
+}
+
 /// `~/Mnemos/projects`
 pub fn projects_root() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("projects"))
+}
+
+/// `~/Mnemos/recordings` — every conversation's on-disk home, filed or not,
+/// keyed by conversation id alone. Project assignment lives purely in
+/// `conversations.project_id`; it never affects this path. Through W16 this
+/// was project-scoped (`projects/<id>/conversations/<convId>/`), mirroring
+/// LanceDB's real need for a per-project directory it can atomically
+/// `rm -rf` on project delete (HLD §5.4/v1.3) — but plain audio/transcript
+/// blobs have no such requirement, and nesting them anyway meant every
+/// project reassignment had to rename a live directory on disk, which
+/// silently broke anything that had independently cached the old path (the
+/// mac sidecar's live-transcription mic.wav location was one). Flat and
+/// DB-owned removes that whole class of bug instead of patching each cache
+/// site. LanceDB, when it ships, keeps its own `projects/<id>/lancedb/` —
+/// that isolation need is real and stays project-scoped.
+pub fn recordings_root() -> Result<PathBuf, AppError> {
+    Ok(data_root()?.join("recordings"))
+}
+
+/// `~/Mnemos/runtime/mcp` — per-chat-session `mcp.json` files a `ClaudeRunner`
+/// writes on `start()` and deletes on `dispose()` (LLD-07 §6.1, W13a).
+pub fn mcp_config_dir() -> Result<PathBuf, AppError> {
+    Ok(data_root()?.join("runtime").join("mcp"))
+}
+
+/// `~/Mnemos/runtime/mcp/<session_id>.json`. `session_id` is the runner's own
+/// generated `--session-id` (a UUID), not user input — not run through
+/// `validate_uuid` since callers here never see anything else.
+pub fn mcp_config_path(session_id: &str) -> Result<PathBuf, AppError> {
+    Ok(mcp_config_dir()?.join(format!("{session_id}.json")))
 }
 
 /// Rejects anything that is not a canonical UUID (36 chars, hex + dashes) —
@@ -64,40 +124,53 @@ pub fn project_memory_path(project_id: &str) -> Result<PathBuf, AppError> {
     Ok(project_dir(project_id)?.join("project_memory.json"))
 }
 
+/// `~/Mnemos/projects/<projectId>/project_memory_history/`
+pub fn project_memory_history_dir(project_id: &str) -> Result<PathBuf, AppError> {
+    Ok(project_dir(project_id)?.join("project_memory_history"))
+}
+
 /// `~/Mnemos/projects/<projectId>/project_memory_history/<iso>.json`
 pub fn project_memory_history_path(project_id: &str, iso_ts: &str) -> Result<PathBuf, AppError> {
-    Ok(project_dir(project_id)?
-        .join("project_memory_history")
-        .join(format!("{iso_ts}.json")))
+    Ok(project_memory_history_dir(project_id)?.join(format!("{iso_ts}.json")))
 }
 
-/// `~/Mnemos/projects/<projectId>/conversations/<conversationId>/`
-pub fn conversation_dir(project_id: &str, conversation_id: &str) -> Result<PathBuf, AppError> {
+/// `~/Mnemos/recordings/<conversationId>/` — see `recordings_root` for why
+/// this no longer takes a `project_id`.
+pub fn conversation_dir(conversation_id: &str) -> Result<PathBuf, AppError> {
     validate_uuid(conversation_id)?;
-    Ok(project_dir(project_id)?
-        .join("conversations")
-        .join(conversation_id))
+    Ok(recordings_root()?.join(conversation_id))
 }
 
-/// `.../conversations/<conversationId>/transcript.json`
-pub fn transcript_json_path(project_id: &str, conversation_id: &str) -> Result<PathBuf, AppError> {
-    Ok(conversation_dir(project_id, conversation_id)?.join("transcript.json"))
+/// `.../recordings/<conversationId>/transcript.json`
+pub fn transcript_json_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("transcript.json"))
 }
 
-/// `.../conversations/<conversationId>/transcript.jsonl` — append-only live buffer,
+/// `.../recordings/<conversationId>/transcript.jsonl` — append-only live buffer,
 /// per LLD-01 §6.2. Retained until the pipeline reaches `done`, then deleted.
-pub fn transcript_jsonl_path(project_id: &str, conversation_id: &str) -> Result<PathBuf, AppError> {
-    Ok(conversation_dir(project_id, conversation_id)?.join("transcript.jsonl"))
+pub fn transcript_jsonl_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("transcript.jsonl"))
 }
 
-/// `.../conversations/<conversationId>/extraction.json`
-pub fn extraction_json_path(project_id: &str, conversation_id: &str) -> Result<PathBuf, AppError> {
-    Ok(conversation_dir(project_id, conversation_id)?.join("extraction.json"))
+/// `.../recordings/<conversationId>/extraction.json`
+pub fn extraction_json_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("extraction.json"))
 }
 
-/// `.../conversations/<conversationId>/summary.md`
-pub fn summary_md_path(project_id: &str, conversation_id: &str) -> Result<PathBuf, AppError> {
-    Ok(conversation_dir(project_id, conversation_id)?.join("summary.md"))
+/// `.../recordings/<conversationId>/summary.md`
+pub fn summary_md_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("summary.md"))
+}
+
+/// `.../recordings/<conversationId>/mic.wav` (LLD-03 §4 — 16kHz mono
+/// 16-bit PCM, written by the mac sidecar or the Windows capture thread).
+pub fn mic_wav_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("mic.wav"))
+}
+
+/// `.../recordings/<conversationId>/system.wav`
+pub fn system_wav_path(conversation_id: &str) -> Result<PathBuf, AppError> {
+    Ok(conversation_dir(conversation_id)?.join("system.wav"))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -144,9 +217,14 @@ mod tests {
     }
 
     #[test]
-    fn conversation_dir_rejects_traversal_in_either_id() {
+    fn conversation_dir_rejects_traversal() {
+        assert!(conversation_dir("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn conversation_dir_sits_flat_under_recordings_root() {
         let good = "550e8400-e29b-41d4-a716-446655440000";
-        assert!(conversation_dir("../../etc", good).is_err());
-        assert!(conversation_dir(good, "../../etc").is_err());
+        let dir = conversation_dir(good).expect("home dir must resolve in test env");
+        assert!(dir.ends_with(format!("Mnemos/recordings/{good}")));
     }
 }

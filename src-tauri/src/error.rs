@@ -8,7 +8,7 @@
 use serde::Serialize;
 use specta::Type;
 
-#[derive(Debug, thiserror::Error, Serialize, Type)]
+#[derive(Debug, Clone, thiserror::Error, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppError {
     #[error("entity {entity} with id {id} not found")]
@@ -52,6 +52,27 @@ pub enum AppError {
         correlation_id: String,
     },
 
+    /// The runner reached the user's provider-side usage limit — a
+    /// *recoverable* refusal, distinct from `Runner` (which means the CLI
+    /// crashed, was misconfigured, or returned garbage). Kept separate
+    /// because the two need opposite user-facing treatment: `Runner` says
+    /// "something is broken", this says "come back when your limit resets;
+    /// nothing was lost".
+    ///
+    /// `Display` is the bare message, no variant prefix — it is written to
+    /// `pipeline_state.error` and rendered verbatim to the user by
+    /// Conversation Detail's failure banner.
+    #[error("{message}")]
+    RunnerBlocked {
+        runner: String,
+        /// Epoch **seconds** the limit is expected to reset, when the
+        /// provider tells us. `None` is normal — not every refusal carries
+        /// one, and a pay-per-token exhaustion has no reset window at all.
+        resets_at: Option<i64>,
+        message: String,
+        correlation_id: String,
+    },
+
     #[error("operation cancelled")]
     Cancelled,
 
@@ -74,7 +95,7 @@ impl AppError {
     pub fn internal(message: impl Into<String>) -> Self {
         let correlation_id = correlation_id();
         let message = message.into();
-        tracing::error!(correlation_id = %correlation_id, "internal error");
+        tracing::error!(correlation_id = %correlation_id, message = %message, "internal error");
         Self::Internal {
             message,
             correlation_id,
@@ -83,9 +104,10 @@ impl AppError {
 
     pub fn storage(message: impl Into<String>) -> Self {
         let correlation_id = correlation_id();
-        tracing::error!(correlation_id = %correlation_id, "storage error");
+        let message = message.into();
+        tracing::error!(correlation_id = %correlation_id, message = %message, "storage error");
         Self::Storage {
-            message: message.into(),
+            message,
             correlation_id,
         }
     }

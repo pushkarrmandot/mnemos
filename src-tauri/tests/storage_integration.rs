@@ -117,7 +117,7 @@ async fn pending_delete_crash_resume_cycle() {
         .unwrap();
     let conv = svc
         .insert_conversation(NewConversation {
-            project_id: project3.id.clone(),
+            project_id: Some(project3.id.clone()),
             title: "Kickoff".into(),
             started_at: 1_700_000_000,
             runner_id: None,
@@ -132,7 +132,7 @@ async fn pending_delete_crash_resume_cycle() {
     )
     .await
     .unwrap();
-    let conv_dir = paths::conversation_dir(&project3.id, &conv.id).unwrap();
+    let conv_dir = paths::conversation_dir(&conv.id).unwrap();
     write_marker_file(&conv_dir);
 
     svc.delete_conversation(&conv.id).await.unwrap();

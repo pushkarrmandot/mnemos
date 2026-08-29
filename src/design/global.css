@@ -58,10 +58,14 @@
   --color-info: var(--info);
   --color-info-bg: var(--info-bg);
   --color-recording: var(--recording);
+  --color-waveform-1: var(--waveform-gradient-1);
+  --color-waveform-2: var(--waveform-gradient-2);
+  --color-waveform-3: var(--waveform-gradient-3);
 
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
 
   --font-sans: var(--font-body);
   --font-display: var(--font-display);
@@ -119,6 +123,23 @@
   .hover\:text-primary:hover {
     color: var(--text-primary);
   }
+  /* `hover:text-secondary` collides with the shadcn `--color-secondary`
+     theme token (`@theme inline` above maps it to `--bg-subtle`, for
+     `bg-secondary`/`text-secondary-foreground` elsewhere) — Tailwind
+     auto-generates a `text-secondary`/`hover:text-secondary` pair from that
+     token, and without this override the auto-generated hover variant wins,
+     rendering hover text in a near-white background color instead of our
+     actual secondary text token. Same fix as `hover:text-primary` above. */
+  .hover\:text-secondary:hover {
+    color: var(--text-secondary);
+  }
+  /* `placeholder:text-tertiary` (NotesPane, NotesTab) has no effect without
+     this — Tailwind only auto-generates variants for `@theme` colors, and
+     these `text-*` classes are hand-authored above, not theme colors, so
+     the browser's own default placeholder color was showing through. */
+  .placeholder\:text-tertiary::placeholder {
+    color: var(--text-tertiary);
+  }
 
   .border-subtle {
     border-color: var(--border-subtle);
@@ -150,5 +171,111 @@
   svg[data-lucide],
   .lucide {
     stroke-width: 1.75;
+  }
+}
+
+/**
+ * DESIGN_SYSTEM.md §14 + §21 — the two animated appearances the shell owns.
+ *
+ * Toast: slide-up 8px + fade on `motion-tuck` enter, pure fade out on
+ * `motion-quick` (exits ≤ enters, and when in doubt no movement on exit).
+ * Dialog: `motion-tuck` enter for the panel, plain fade for the backdrop.
+ *
+ * `prefers-reduced-motion: reduce` is handled once in reset.css, which flattens
+ * every animation to 0.01ms — the end state still applies, so nothing is left
+ * mid-flight and `animationend` still fires (the toast exit depends on it).
+ */
+@layer components {
+  @keyframes mnemos-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes mnemos-toast-out {
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes mnemos-dialog-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, calc(-50% + 8px)) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+  }
+  @keyframes mnemos-dialog-out {
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes mnemos-overlay-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .animate-toast-in {
+    animation: mnemos-toast-in var(--motion-tuck-duration) var(--motion-tuck-ease) both;
+  }
+  .animate-toast-out {
+    animation: mnemos-toast-out var(--motion-quick-duration) var(--motion-quick-ease) forwards;
+  }
+  .animate-dialog-in {
+    animation: mnemos-dialog-in var(--motion-tuck-duration) var(--motion-tuck-ease) both;
+  }
+  .animate-dialog-out {
+    animation: mnemos-dialog-out var(--motion-quick-duration) var(--motion-quick-ease) forwards;
+  }
+  .animate-overlay-in {
+    animation: mnemos-overlay-in var(--motion-tuck-duration) var(--motion-tuck-ease) both;
+  }
+
+  /* W19 — Home's loading state. A moving highlight over a flat block, not a
+     pulse/fade: a pulse reads as "something is wrong and blinking", a sweep
+     reads as "content is being drawn in", which is the actual state. */
+  @keyframes mnemos-skeleton-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+  .animate-skeleton {
+    background-image: linear-gradient(
+      100deg,
+      var(--bg-subtle) 35%,
+      var(--bg-hover) 50%,
+      var(--bg-subtle) 65%
+    );
+    background-size: 200% 100%;
+    animation: mnemos-skeleton-shimmer 1.6s ease-in-out infinite;
+  }
+}
+
+/**
+ * DESIGN_SYSTEM.md §21, Dialog row — the scrim.
+ *
+ * shadcn's overlay is rendered inside its own `DialogContent`, out of reach of
+ * a wrapper's className, so the override lives here: a blurred
+ * `rgba(0,0,0,0.4)` instead of the flat `bg-black/50` default. One rule covers
+ * every dialog in the app, including any shadcn primitive vendored later.
+ */
+@layer components {
+  [data-slot="dialog-overlay"] {
+    background-color: rgb(0 0 0 / 0.4);
+    backdrop-filter: blur(4px);
+    animation: mnemos-overlay-in var(--motion-tuck-duration) var(--motion-tuck-ease) both;
   }
 }

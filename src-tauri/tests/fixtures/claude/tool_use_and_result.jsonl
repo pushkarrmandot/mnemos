@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","cwd":"/private/tmp","session_id":"scrubbed-session","model":"claude-sonnet-5","permissionMode":"default"}
+{"type":"assistant","message":{"id":"scrubbed","model":"claude-sonnet-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_scrubbed","name":"mcp__mnemos__mnemos_list_action_items","input":{}}],"stop_reason":null},"session_id":"scrubbed-session"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_scrubbed","type":"tool_result","content":"{\"items\":[{\"id\":\"item-1\",\"text\":\"Send updated BOM\"}]}"}]},"session_id":"scrubbed-session"}
+{"type":"assistant","message":{"id":"scrubbed2","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"You have one open action item."}],"stop_reason":null},"session_id":"scrubbed-session"}
+{"is_error":false,"duration_api_ms":100,"num_turns":2,"stop_reason":"end_turn","session_id":"scrubbed-session","usage":{"input_tokens":1,"output_tokens":1},"subtype":"success","result":"","type":"result"}

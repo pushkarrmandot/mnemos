@@ -1,0 +1,27 @@
+# Tracked in git — deliberately, not gitignored. PostHog's client-capture
+# keys are public, write-only, rate-limited tokens meant to ship inside a
+# client binary (the same trust model as a Sentry DSN or PostHog's own JS
+# snippet key), so this file needs to be committed for a packaged build
+# (yours, CI's, or anyone else's after this repo is open-sourced) to have
+# working telemetry with no manual per-machine setup step.
+#
+# Cargo reads `[env]` here automatically on every `cargo build` / `cargo
+# test` / `pnpm tauri dev` / `cargo tauri build` — no shell export needed.
+# `src-tauri/src/metrics/config.rs` reads these at compile time via
+# `option_env!("POSTHOG_API_KEY")` / `option_env!("POSTHOG_HOST")`.
+#
+# Debug builds stay silent by default even with a real key present here
+# (`api_key()` in `config.rs` checks `cfg!(debug_assertions)`) — otherwise
+# every contributor's everyday dev run would mix test noise into production
+# PostHog data. Only `cargo tauri build`'s release profile sends for real.
+# Set `POSTHOG_FORCE_DEV = "1"` below (or as a real shell env var) to
+# temporarily force a local debug build to send too, e.g. while verifying
+# an event end-to-end in PostHog's live view.
+
+[env]
+POSTHOG_API_KEY = "phc_your_real_key_here"
+# Omit POSTHOG_HOST entirely to use the default (PostHog US cloud,
+# https://us.i.posthog.com). Set it only for EU cloud or a self-hosted
+# instance, e.g.:
+# POSTHOG_HOST = "https://eu.i.posthog.com"
+# POSTHOG_FORCE_DEV = "1"

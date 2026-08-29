@@ -12,6 +12,7 @@ const APP_ERROR_KINDS = [
   "permission_denied",
   "network",
   "runner",
+  "runner_blocked",
   "storage",
   "validation",
   "model",
@@ -55,6 +56,8 @@ export function describeError(error: AppError): string {
       return `network error [${error.correlation_id}]`;
     case "runner":
       return `runner ${error.runner} failed [${error.correlation_id}]`;
+    case "runner_blocked":
+      return `runner ${error.runner} blocked by usage limit [${error.correlation_id}]`;
     case "storage":
       return `storage error [${error.correlation_id}]`;
     case "validation":

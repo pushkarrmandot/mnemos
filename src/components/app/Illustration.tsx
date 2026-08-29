@@ -15,6 +15,7 @@ export type IllustrationSlot =
   | "empty-project"
   | "empty-contacts"
   | "empty-search"
+  | "coming-soon"
   | "sensitive-banner-icon"
   | "sadpath-generic"
   | "permission-mic"
@@ -48,6 +49,8 @@ const paths: Record<IllustrationSlot, readonly string[]> = {
   "empty-contacts": ["M60 30a11 11 0 1 1 0 22 11 11 0 0 1 0-22Z", "M36 74a24 24 0 0 1 48 0"],
   // Magnifier, no results inside it.
   "empty-search": ["M54 24a22 22 0 1 1 0 44 22 22 0 0 1 0-44Z", "M70 62l18 18"],
+  // A clock, hands short of the hour — not yet, not never.
+  "coming-soon": ["M60 20a37 37 0 1 1 0 74 37 37 0 0 1 0-74Z", "M60 34v27l19 11"],
   // A closed lock: this one is 1:1 and sits inline in a banner.
   "sensitive-banner-icon": [
     "M28 42h34a4 4 0 0 1 4 4v22a4 4 0 0 1-4 4H28a4 4 0 0 1-4-4V46a4 4 0 0 1 4-4Z",

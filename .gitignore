@@ -6,3 +6,9 @@ src-tauri/gen/
 *.local
 node_modules/.tmp/
 app-icon.png
+src-python/.venv/
+src-python/**/__pycache__/
+src-python/.pytest_cache/
+src-python/**/*.egg-info/
+src-python/.ruff_cache/
+swift/**/.build/

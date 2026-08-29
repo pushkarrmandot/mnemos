@@ -1,56 +1,82 @@
-import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Copy } from "lucide-react";
+import { AlertCircle, Copy, RotateCcw, Sparkles } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Button } from "@/components/app/Button";
+import { commands } from "@/ipc/client";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { commands } from "@/ipc/client";
 import { qk } from "@/queries/keys";
-import { useChatStore } from "@/stores/chat";
+import { EMPTY_SESSION, type OutboxEntry, useChatStore } from "@/stores/chat";
 import { useUIStore } from "@/stores/ui";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { type Message, projectHistory } from "./projectHistory";
 import { ToolDisclosureRow } from "./ToolDisclosureRow";
-
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  timestamp: number;
-  toolDisclosures?: Array<{
-    callId: string;
-    toolName: string;
-    humanReadable: string;
-    state: "running" | "done" | "failed";
-    summary?: string;
-  }>;
-}
 
 /**
  * Message list component (06_CHAT.md §5).
- * Renders messages from the journal + any streaming in-flight turn.
+ * Renders history (via `projectHistory`) + any streaming in-flight turn +
+ * pending/failed outbox entries.
+ *
+ * `localKey` (live/local state — outbox, in-flight turn) and
+ * `resolvedSessionId` (backend id — history fetch) are deliberately
+ * separate props, not one `sessionId` — see `chatScope.ts`'s doc comment
+ * for why: the backend id isn't known until a resolve query or a send's ack
+ * completes, but local state needs a key immediately.
  */
-export function MessageList({ sessionId }: { sessionId: string | null }) {
+export function MessageList({
+  localKey,
+  resolvedSessionId,
+  onRetry,
+}: {
+  localKey: string;
+  resolvedSessionId: string | null;
+  /** Re-sends a failed outbox entry's text as a brand-new message — see
+   * `ChatPane.tsx`. Not wired to the store's `retryOutbox` clientId-reuse
+   * path: nothing on the backend dedupes by clientId yet (LLD-10 §8.4 is
+   * flagged there as unimplemented), so reusing the id would risk a silent
+   * duplicate if the first attempt actually landed. A fresh send is safe
+   * either way. */
+  onRetry: (entry: OutboxEntry) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pushToast = useUIStore((s) => s.pushToast);
 
   // Get in-flight turn state
-  const inFlightTurnId = useChatStore((s) => s.bySession[sessionId ?? ""]?.inFlightTurnId ?? null);
-  const streamingText = useChatStore((s) => s.bySession[sessionId ?? ""]?.streamingText ?? "");
-  const toolDisclosures = useChatStore((s) => s.bySession[sessionId ?? ""]?.toolDisclosures ?? []);
-  const scrollAnchor = useChatStore((s) => s.bySession[sessionId ?? ""]?.scrollAnchor ?? "bottom");
+  const inFlightTurnId = useChatStore((s) => s.bySession[localKey]?.inFlightTurnId ?? null);
+  const streamingText = useChatStore((s) => s.bySession[localKey]?.streamingText ?? "");
+  // `?? EMPTY_SESSION.toolDisclosures` — NOT `?? []`. A fresh `[]` literal on
+  // every selector call defeats useSyncExternalStore's snapshot-equality
+  // check (Zustand v5) and causes an infinite re-render loop ("Maximum
+  // update depth exceeded"); EMPTY_SESSION's array is a stable reference.
+  const toolDisclosures = useChatStore(
+    (s) => s.bySession[localKey]?.toolDisclosures ?? EMPTY_SESSION.toolDisclosures,
+  );
+  const scrollAnchor = useChatStore((s) => s.bySession[localKey]?.scrollAnchor ?? "bottom");
   const setScrollAnchor = useChatStore((s) => s.setScrollAnchor);
+  const outbox = useChatStore((s) => s.outbox);
+  const discardOutbox = useChatStore((s) => s.discardOutbox);
+  const sessionOutbox = outbox.filter((entry) => entry.sessionId === localKey);
 
-  // Fetch chat history
+  // Fetch chat history — real now (was a hardcoded `[]` stub): journal rows
+  // in, rendered messages out via `projectHistory`. Gated on the backend id
+  // being resolved; a brand-new scope with nothing sent yet has none, which
+  // is correctly "no history" rather than an error.
   const { data: messages = [] } = useQuery({
-    queryKey: qk.chat(sessionId ?? ""),
-    queryFn: () =>
-      sessionId
-        ? commands.chat.getSessionHistory(sessionId, { beforeSeq: null, limit: 200 })
-        : Promise.resolve([]),
-    enabled: !!sessionId,
+    queryKey: qk.chat(resolvedSessionId ?? ""),
+    queryFn: async () => {
+      if (!resolvedSessionId) return [];
+      const records = await commands.chat.getSessionHistory(resolvedSessionId, {
+        beforeSeq: null,
+        limit: 200,
+      });
+      return projectHistory(records);
+    },
+    enabled: !!resolvedSessionId,
   });
 
   // Auto-scroll to bottom when streaming
+  // biome-ignore lint/correctness/useExhaustiveDependencies: streamingText is the intentional re-scroll trigger on every streamed chunk, not a value read in the effect
   useEffect(() => {
     if (scrollAnchor === "bottom" && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -62,9 +88,9 @@ export function MessageList({ sessionId }: { sessionId: string | null }) {
     const el = e.currentTarget;
     const isAtBottom = Math.abs(el.scrollHeight - el.scrollTop - el.clientHeight) < 50;
     if (!isAtBottom && scrollAnchor === "bottom") {
-      setScrollAnchor(sessionId ?? "", "manual");
+      setScrollAnchor(localKey, "manual");
     } else if (isAtBottom && scrollAnchor === "manual") {
-      setScrollAnchor(sessionId ?? "", "bottom");
+      setScrollAnchor(localKey, "bottom");
     }
   };
 
@@ -74,42 +100,60 @@ export function MessageList({ sessionId }: { sessionId: string | null }) {
     });
   };
 
-  if (!sessionId) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-center text-secondary text-sm">{t("chat.no-session")}</p>
-      </div>
-    );
-  }
+  const isEmpty = messages.length === 0 && !inFlightTurnId && sessionOutbox.length === 0;
 
   return (
-    <div ref={containerRef} onScroll={handleScroll} className="space-y-4 px-3 py-4 overflow-y-auto">
-      {messages.length === 0 && !inFlightTurnId && (
-        <div className="flex flex-col items-center justify-center min-h-full">
-          <p className="text-sm text-secondary text-center">{t("chat.empty")}</p>
+    <div ref={containerRef} onScroll={handleScroll} className="space-y-4 overflow-y-auto px-3 py-4">
+      {isEmpty && (
+        <div className="flex min-h-full flex-col items-center justify-center gap-3 px-8 text-center">
+          <div className="flex size-12 items-center justify-center rounded-full bg-accent-primary-bg">
+            <Sparkles className="size-5 text-accent-primary" />
+          </div>
+          <div className="space-y-1">
+            <p className="font-medium text-primary text-sm">{t("chat.empty-title")}</p>
+            <p className="text-secondary text-xs">{t("chat.empty-subtitle")}</p>
+          </div>
         </div>
       )}
 
       {/* Durable messages from history */}
       {messages.map((msg) => (
-        <MessageBubble key={(msg as any).id} message={msg} onCopy={copyToClipboard} />
+        <MessageBubble key={msg.id} message={msg} onCopy={copyToClipboard} />
+      ))}
+
+      {/* Pending/in-flight/failed outbox entries — the user's own just-sent
+       * message, rendered immediately instead of waiting for the next
+       * history refetch (the message the outbox already always tracked, but
+       * that nothing ever rendered). Rendered *before* the in-flight turn
+       * block below, not after: conversation order is "I ask, then Claude
+       * answers" — rendering the outbox bubble last put the user's own
+       * message visually *below* the assistant's in-progress response while
+       * streaming, which read as backwards (and self-corrected once the
+       * turn finished and everything came from durable history in the
+       * right order, which is what made it easy to miss). */}
+      {sessionOutbox.map((entry) => (
+        <OutboxBubble
+          key={entry.clientId}
+          entry={entry}
+          onRetry={() => onRetry(entry)}
+          onDiscard={() => discardOutbox(entry.clientId)}
+        />
       ))}
 
       {/* In-flight turn */}
       {inFlightTurnId && (
-        <>
-          {/* Assistant streaming */}
-          <div className="space-y-2">
-            <div className="rounded border border-subtle bg-elevated p-3">
-              <div className="text-sm text-primary whitespace-pre-wrap break-words">
-                {streamingText || <span className="text-tertiary">...</span>}
-              </div>
-            </div>
-
-            {/* Tool disclosure row if any tools are used */}
-            {toolDisclosures.length > 0 && <ToolDisclosureRow toolDisclosures={toolDisclosures} />}
+        <div className="space-y-2">
+          <div className="relative rounded-lg border border-subtle bg-elevated p-3 shadow-floating">
+            {streamingText ? (
+              <ChatMarkdown text={streamingText} />
+            ) : (
+              <span className="text-sm text-tertiary">...</span>
+            )}
           </div>
-        </>
+
+          {/* Tool disclosure row if any tools are used */}
+          {toolDisclosures.length > 0 && <ToolDisclosureRow toolDisclosures={toolDisclosures} />}
+        </div>
       )}
 
       <div ref={messagesEndRef} className="py-4" />
@@ -118,32 +162,78 @@ export function MessageList({ sessionId }: { sessionId: string | null }) {
 }
 
 function MessageBubble({ message, onCopy }: { message: Message; onCopy: (text: string) => void }) {
-  const [isHovered, setIsHovered] = useState(false);
-
   return (
     <div
-      className={cn("flex gap-2", message.role === "user" ? "justify-end" : "justify-start")}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
+      className={cn("group flex gap-2", message.role === "user" ? "justify-end" : "justify-start")}
     >
       <div
         className={cn(
-          "rounded px-3 py-2 max-w-xs",
+          "relative max-w-[85%] rounded-lg px-3 py-2",
           message.role === "user"
             ? "bg-accent-primary-bg text-primary"
-            : "bg-elevated border border-subtle text-primary",
+            : "border border-subtle bg-elevated text-primary shadow-floating",
         )}
       >
-        <div className="text-sm whitespace-pre-wrap break-words">{message.text}</div>
-        {isHovered && (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="absolute ml-2 -mt-8 h-6 w-6"
-            onClick={() => onCopy(message.text)}
-          >
-            <Copy className="size-4" />
-          </Button>
+        {message.role === "assistant" ? (
+          <ChatMarkdown text={message.text} />
+        ) : (
+          <div className="whitespace-pre-wrap break-words text-sm">{message.text}</div>
+        )}
+        <Button
+          size="icon"
+          variant="ghost"
+          className="absolute -top-3 -right-3 hidden h-6 w-6 rounded-full border border-subtle bg-elevated shadow-sm group-hover:flex"
+          onClick={() => onCopy(message.text)}
+          title={message.role === "assistant" ? "Copy as Markdown" : "Copy"}
+        >
+          <Copy className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** A user message that hasn't landed in durable history yet — `pending`/
+ * `in_flight` render the same as a normal user bubble (just dimmed, so a
+ * slow send doesn't look broken); `failed` gets a retry/discard affordance
+ * since the text was never accepted at all. */
+function OutboxBubble({
+  entry,
+  onRetry,
+  onDiscard,
+}: {
+  entry: OutboxEntry;
+  onRetry: () => void;
+  onDiscard: () => void;
+}) {
+  const failed = entry.status === "failed";
+  return (
+    <div className="flex justify-end gap-2">
+      <div
+        className={cn(
+          "max-w-[85%] rounded-lg px-3 py-2",
+          failed
+            ? "border border-danger bg-danger-bg text-primary"
+            : "bg-accent-primary-bg text-primary opacity-60",
+        )}
+      >
+        <div className="whitespace-pre-wrap break-words text-sm">{entry.text}</div>
+        {failed && (
+          <div className="mt-2 flex items-center gap-2 text-danger text-xs">
+            <AlertCircle className="size-3.5" />
+            <span>Failed to send</span>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="ml-auto flex items-center gap-1 text-primary hover:text-accent-primary"
+            >
+              <RotateCcw className="size-3" />
+              Retry
+            </button>
+            <button type="button" onClick={onDiscard} className="text-tertiary hover:text-primary">
+              Discard
+            </button>
+          </div>
         )}
       </div>
     </div>

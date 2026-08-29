@@ -16,12 +16,9 @@ function SettingsRoute() {
     <div className="mx-auto w-full max-w-[680px] px-8 py-10">
       <h1 className="type-h1 text-primary">{t("settings.heading")}</h1>
 
-      <section className="mt-8 border-subtle border-t pt-6">
-        <h2 className="type-h2 text-primary">{t("settings.appearance.heading")}</h2>
-        <p className="type-body mt-1 text-secondary">{t("settings.appearance.body")}</p>
-        <div className="mt-4">
-          <ThemeToggle />
-        </div>
+      <section className="mt-8 flex items-center justify-between border-subtle border-t pt-6">
+        <span className="type-body text-primary">{t("settings.appearance.heading")}</span>
+        <ThemeToggle />
       </section>
 
       <p className="type-caption mt-10 text-tertiary">{t("settings.placeholder")}</p>

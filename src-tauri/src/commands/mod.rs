@@ -1,7 +1,14 @@
 //! One module per feature area, mirroring `src/features/*` on the frontend
-//! (BACKEND §1). W1 ships only the liveness probe; later waves add
-//! `recording.rs`, `conversation.rs`, `project.rs`, `contact.rs`, `chat.rs`,
+//! (BACKEND §1). W1 shipped only the liveness probe; W9 adds `recording`.
+//! Later waves add `conversation.rs`, `project.rs`, `contact.rs`, `chat.rs`,
 //! `settings.rs`.
+
+pub mod chat;
+pub mod conversation;
+pub mod metrics;
+pub mod onboarding;
+pub mod project;
+pub mod recording;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;

@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/private/tmp","session_id":"scrubbed-session","model":"claude-sonnet-5","permissionMode":"default"}
+{"type":"assistant","message":{"id":"scrubbed","model":"claude-sonnet-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_scrubbed","name":"mnemos_search","input":{"query":"budget"}}],"stop_reason":null},"session_id":"scrubbed-session"}
+{"is_error":false,"duration_api_ms":100,"num_turns":1,"stop_reason":"tool_use","session_id":"scrubbed-session","usage":{"input_tokens":1,"output_tokens":1},"subtype":"success","result":"","type":"result"}

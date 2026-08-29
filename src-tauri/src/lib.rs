@@ -1,11 +1,15 @@
 //! Mnemos Tauri host. `main.rs` is a shim over `run()`; everything real lives
 //! here so the crate stays testable and mobile-ready.
 
+pub mod capture;
 pub mod commands;
 pub mod db;
 pub mod error;
 pub mod fs;
+pub mod ipc;
 pub mod logging;
+pub mod memory;
+pub mod metrics;
 pub mod state;
 
 use tauri::Manager;
@@ -23,8 +27,89 @@ pub const BINDINGS_PATH: &str = "../bindings/tauri.ts";
 /// the two lists cannot drift.
 pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        .commands(collect_commands![commands::ping])
+        .commands(collect_commands![
+            commands::ping,
+            commands::recording::start_recording,
+            commands::recording::stop_recording,
+            commands::recording::subscribe_transcript,
+            commands::recording::unsubscribe_transcript,
+            commands::recording::subscribe_mic_level,
+            commands::recording::unsubscribe_mic_level,
+            commands::recording::pause_recording,
+            commands::recording::resume_recording,
+            commands::recording::list_interrupted_recordings,
+            commands::recording::discard_interrupted_recording,
+            commands::recording::recover_interrupted_recording,
+            commands::recording::list_stuck_processing,
+            commands::recording::discard_stuck_processing,
+            commands::recording::resume_stuck_processing,
+            commands::conversation::conversation_retry_step,
+            commands::conversation::get_conversation_detail,
+            commands::conversation::conversation_set_action_item_done,
+            commands::conversation::conversation_set_title,
+            commands::conversation::conversation_set_notes,
+            commands::conversation::conversation_delete,
+            commands::conversation::conversation_create_action_item,
+            commands::conversation::list_conversations,
+            commands::conversation::conversation_set_project,
+            commands::project::project_refresh_memory,
+            commands::project::list_projects,
+            commands::project::create_project,
+            commands::project::get_project,
+            commands::project::project_set_name,
+            commands::project::get_project_memory,
+            commands::conversation::count_conversations,
+            commands::conversation::create_standalone_action_item,
+            commands::conversation::list_my_action_items,
+            commands::conversation::set_action_item_assignee,
+            commands::conversation::set_open_question_owner,
+            commands::conversation::set_open_question_resolved,
+            commands::project::dashboard_get_project_pulse,
+            commands::project::project_get_memory_status,
+            commands::project::project_list_action_items,
+            commands::project::project_list_decisions,
+            commands::project::project_list_open_questions,
+            commands::chat::chat_send_prompt,
+            commands::chat::chat_cancel_turn,
+            commands::chat::chat_get_session_history,
+            commands::chat::chat_start_new_session,
+            commands::chat::chat_rename_session,
+            commands::chat::chat_list_sessions,
+            commands::chat::chat_resolve_session,
+            commands::onboarding::onboarding_get_status,
+            commands::onboarding::onboarding_set_user_name,
+            commands::onboarding::onboarding_complete,
+            commands::onboarding::onboarding_dismiss_calendar_checklist,
+            commands::onboarding::onboarding_check_claude_cli,
+            commands::onboarding::onboarding_check_permissions,
+            commands::onboarding::onboarding_request_mic_permission,
+            commands::onboarding::onboarding_request_screen_permission,
+            commands::onboarding::onboarding_open_system_settings,
+            commands::onboarding::onboarding_subscribe_model_download,
+            commands::metrics::track_event,
+        ])
         .events(collect_events![])
+}
+
+/// Dev-mode worker config: a `python3` on PATH running `src-python/` in
+/// place. Production packaging (a bundled interpreter baked in by the Tauri
+/// sidecar bundler, per LLD-02 §3) is not wired up yet — no bundler config
+/// exists in `tauri.conf.json` this wave; see the LLD's "Implementation
+/// status" for why that's deferred.
+fn worker_config() -> Result<crate::ipc::python::SupervisorConfig, AppError> {
+    let python_bin = std::path::PathBuf::from(if cfg!(windows) { "python" } else { "python3" });
+    let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../src-python");
+    let state_dir = crate::fs::paths::state_dir()?;
+    #[allow(unused_mut)]
+    let mut cfg = crate::ipc::python::SupervisorConfig::new(python_bin, cwd, state_dir);
+    // Dev-mode sidecar path (no bundler packaging yet — same gap as
+    // `python_bin` above; see LLD-02's "Implementation status").
+    #[cfg(target_os = "macos")]
+    {
+        cfg.sidecar_bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../swift/mnemos-audio/.build/release/mnemos-audio");
+    }
+    Ok(cfg)
 }
 
 /// TypeScript emit settings — shared by the dev-time export and the CI check so
@@ -46,6 +131,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Debug-session patch: remembers the main window's size/position/
+        // maximized state across launches (restores automatically before
+        // `setup` runs); `tauri.conf.json`'s 1200x800 + `maximized: true`
+        // is only the very-first-launch fallback, before any state file
+        // exists yet.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
@@ -66,7 +157,7 @@ pub fn run() {
             tracing::info!(component = "host", version = %version, "mnemos starting");
 
             let db_path = crate::fs::paths::db_path()?;
-            let storage = tauri::async_runtime::block_on(async {
+            let (storage, python, metrics) = tauri::async_runtime::block_on(async {
                 let pools = crate::db::init(&db_path).await?;
                 let service = crate::db::service::SqliteStorageService::new(pools);
                 // Crash-resume (LLD-01 §7.5) runs before any command handler
@@ -74,9 +165,44 @@ pub fn run() {
                 // never leaves stale data visible to the UI.
                 use crate::db::service::StorageService;
                 service.resume_pending_deletes().await?;
-                Ok::<_, AppError>(service)
+
+                // Product analytics (`metrics` module) — resolved right
+                // after storage is ready, since it needs the settings table
+                // for the enabled flag / install id. See the module's own
+                // doc comment for why the MCP server binary constructs its
+                // own separate instance of the same module instead of
+                // sharing this one.
+                let metrics_cfg = crate::metrics::config::MetricsConfig::resolve_for_app(
+                    &service,
+                    version.clone(),
+                )
+                .await;
+                let metrics = crate::metrics::Metrics::init(metrics_cfg);
+                metrics.track(
+                    crate::metrics::events::HOST_STARTED,
+                    crate::metrics::properties::EventProperties::from([(
+                        "platform",
+                        crate::metrics::properties::PropertyValue::Enum(std::env::consts::OS),
+                    )]),
+                );
+
+                let python = crate::ipc::python::WorkerSupervisor::spawn(worker_config()?).await?;
+                // First real reverse-RPC handler (LLD-02 §7.2 / LLD-07 §7):
+                // W5 only wired the generic dispatch mechanism with dummy
+                // test handlers.
+                python.register_reverse_rpc(
+                    "run_agent_extraction",
+                    std::sync::Arc::new(
+                        crate::ipc::runner::extraction_handler::ExtractionRpcHandler::new(),
+                    ),
+                );
+                Ok::<_, AppError>((service, python, metrics))
             })?;
-            app.manage(AppState::new(version, storage));
+            app.manage(AppState::new(version, storage, python, metrics));
+
+            // Menu-bar / tray red-dot indicator (LLD-11 §6, v1 slice — see
+            // `commands::recording::build_tray`'s doc comment for scope).
+            commands::recording::build_tray(app)?;
 
             Ok(())
         })

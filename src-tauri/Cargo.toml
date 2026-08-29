@@ -5,23 +5,40 @@ description = "Mnemos — local-first meeting memory"
 edition = "2021"
 rust-version = "1.80"
 publish = false
+# W16 added a second `[[bin]]` (`mnemos-mcp-server`) to this package, so
+# `cargo run` can no longer infer which binary to launch — including the
+# implicit `cargo run` the Tauri CLI shells out to on `pnpm tauri dev`.
+# This pins the ambiguity to the app binary; run the MCP server explicitly
+# via `cargo run --bin mnemos-mcp-server` when that's what you want.
+default-run = "mnemos-tauri"
 
 [lib]
 # Tauri v2 mobile-ready shape: main.rs is a thin shim over the lib.
 name = "mnemos_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# `mnemos-mcp-server` (W16 / LLD-08 §4) — a standalone binary in the SAME
+# package (not a workspace crate: BACKEND_STANDARDS §1 "single crate, not a
+# workspace" for the whole Rust side). It links `mnemos_tauri_lib`'s `rlib`
+# output directly, the same as any other binary target in this package —
+# no Tauri runtime, no window, no Python/Swift subprocess. See the binary's
+# own module docs for why this differs from LLD-08 §5.2's "shared
+# `mnemos-storage` crate" sketch.
+[[bin]]
+name = "mnemos-mcp-server"
+path = "src/bin/mnemos_mcp_server/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-specta = { version = "=2.0.0-rc.22", features = ["derive"] }
+specta = { version = "=2.0.0-rc.22", features = ["derive", "serde_json"] }
 specta-typescript = "0.0.9"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 
@@ -33,7 +50,20 @@ uuid = { version = "1", features = ["v4"] }
 
 async-trait = "0.1"
 regex-lite = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "io-util", "io-std", "sync"] }
+time = { version = "0.3", features = ["parsing", "formatting"] }
+tokio-stream = "0.1"
+futures-core = "0.3"
+futures-util = "0.3"
+tauri-plugin-window-state = "2.4.1"
+# Product analytics transport (`metrics` module) — the only network client
+# in the codebase; rustls-only so the Tauri bundler never needs a system
+# OpenSSL toolchain.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",

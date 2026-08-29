@@ -1,5 +1,5 @@
+import { AlertCircle, CheckCircle2, ChevronDown, Loader } from "lucide-react";
 import { useState } from "react";
-import { ChevronDown, CheckCircle2, AlertCircle, Loader } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 

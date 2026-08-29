@@ -57,17 +57,21 @@
     outline-offset: 2px;
     border-radius: inherit;
   }
+}
 
-  /* DESIGN_SYSTEM.md §14 — reduce disables every duration > 0 and every loop.
-     Fades stay at 80ms so appearance events remain legible. */
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms;
-      animation-iteration-count: 1;
-      transition-duration: 80ms;
-      scroll-behavior: auto;
-    }
+/* DESIGN_SYSTEM.md §14 — reduce disables every duration > 0 and every loop.
+   Fades stay at 80ms so appearance events remain legible.
+
+   Deliberately **unlayered**: the `motion-*` utilities set their durations from
+   the utilities layer, which outranks anything in `base`. Unlayered rules beat
+   every layer, so this is the only place the override actually wins. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+    transition-duration: 80ms;
+    scroll-behavior: auto;
   }
 }

@@ -18,6 +18,789 @@ async ping() : Promise<Result<Pong, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Starts a recording session: creates the `conversations` row, spawns
+ * platform capture (mac sidecar / Windows WASAPI thread via the worker),
+ * and starts the worker's live-transcription poll loop. LLD-11 §5's
+ * `idle -> arming -> recording` — this command is what `arming` waits on.
+ */
+async startRecording(projectId: string | null) : Promise<Result<StartRecordingResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_recording", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops capture, transitions the conversation to `Processing`, and kicks
+ * off the rest of the pipeline (`transcribe_final` -> extraction -> done)
+ * in a detached task so this command returns immediately — the caller
+ * navigates to Conversation Detail on `onMutate` (LLD-11 §5) and watches
+ * `processing-progress` events from there.
+ */
+async stopRecording(sessionId: number) : Promise<Result<StopRecordingResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_recording", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Forwards the worker's `live_transcript_chunk` broadcast (filtered to this
+ * session's conversation) into the Tauri `Channel` React subscribed
+ * through — the "reader task" both LLD-02 and LLD-03's Implementation
+ * status sections left for this wave.
+ */
+async subscribeTranscript(sessionId: number, channel: TAURI_CHANNEL<TranscriptChunk>) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("subscribe_transcript", { sessionId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async unsubscribeTranscript(sessionId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unsubscribe_transcript", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Forwards this session's `(mic_db, system_db)` broadcast onto the Tauri
+ * `Channel` the level meter subscribed through — same shape as
+ * `subscribe_transcript` above, but the source is the capture-watch task's
+ * broadcast sender (`ActiveSession::level_tx`) rather than a worker topic.
+ */
+async subscribeMicLevel(sessionId: number, channel: TAURI_CHANNEL<LevelSample>) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("subscribe_mic_level", { sessionId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async unsubscribeMicLevel(sessionId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unsubscribe_mic_level", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Pauses capture (LLD-11 §3.1's Pause). The capture-side transport already
+ * existed from W7a (`SidecarControl::pause`/Swift `pause` / worker
+ * `pause_capture`); this command is the missing Tauri layer over it.
+ */
+async pauseRecording(sessionId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pause_recording", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resumeRecording(sessionId: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_recording", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Crash recovery (12_CORNER_CASES.md "App crashes & recovery" §Mid-recording
+ * crash). Called once by the frontend on app launch
+ * (`useCrashRecoveryCheck`). A conversation can only be at
+ * `status = 'recording'` while a live `ActiveSession` holds it — if that
+ * never happened this boot (fresh `RecordingRegistry`, empty), any row
+ * still at that status was orphaned by an unclean shutdown of a *previous*
+ * run. Trusting `status` alone is safe for exactly this reason: this
+ * command's own caller (app boot) always runs before `start_recording` can
+ * create a new one this session.
+ */
+async listInterruptedRecordings() : Promise<Result<Conversation[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_interrupted_recordings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Crash recovery's "Discard" action (12_CORNER_CASES.md, same section).
+ * Reuses `StorageService::delete_conversation` — the same atomic,
+ * resumable-on-crash delete path `conversation.retry_step`/Conversation
+ * Detail's (not-yet-built) delete affordance would use, so a discard that
+ * itself gets interrupted mid-delete is cleaned up by the *existing*
+ * `resume_pending_deletes()` pass in `lib.rs`'s `setup()` rather than
+ * needing its own recovery story.
+ */
+async discardInterruptedRecording(conversationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discard_interrupted_recording", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Crash recovery's "Recover" action (12_CORNER_CASES.md "App crashes &
+ * recovery" §Mid-recording crash: "[Recover] runs post-processing on the
+ * partial audio"). There is no live `ActiveSession` to resume from — the
+ * whole point of "orphaned" is that the process that held one is gone — so
+ * this reconstructs just enough of `stop_recording`'s tail to hand the
+ * on-disk `mic.wav`/`system.wav` to the exact same
+ * `run_post_recording_pipeline` a normal Stop uses, rather than growing a
+ * second, parallel post-processing path.
+ * 
+ * **Corner case — missing/near-empty audio.** A crash before the sidecar
+ * ever flushed a chunk (or a conversation folder some other process already
+ * touched) can leave `mic.wav`/`system.wav` at zero bytes or a few
+ * milliseconds of audio. Running the full pipeline on that produces a
+ * "transcription" with nothing in it and an extraction step that has
+ * nothing to summarize — a confusing dead end, not a recovered conversation.
+ * Mirrors LLD-03 §9 failure mode #2's own "enqueue `process_conversation`
+ * IF at least 5s of audio was written; otherwise delete the row" rule:
+ * below that threshold this auto-discards (same atomic path as the
+ * "Discard" button) and tells the caller so, instead of offering a Recover
+ * that can't recover anything or silently failing the pipeline a few
+ * seconds later with a confusing "no speech" result.
+ */
+async recoverInterruptedRecording(conversationId: string) : Promise<Result<RecoverInterruptedResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recover_interrupted_recording", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * W17b — the mid-*processing* counterpart to `list_interrupted_recordings`
+ * above (12_CORNER_CASES.md "App crashes & recovery" §Mid-processing crash:
+ * "This conversation was still processing when Mnemos closed. Continue?").
+ * This half of the corner-cases spec was never built: a conversation
+ * crashed (or force-quit) mid-`run_post_recording_pipeline` was left at
+ * `status = 'processing'` forever, with no boot-time reconciliation and no
+ * UI — `ProcessingOverlay` just spins on a `processing-progress` topic
+ * nothing will ever publish to again. Same reasoning as the recording-crash
+ * case: the registry that would hold a live pipeline task is always empty
+ * at boot, so any row still `processing` this early was orphaned by a
+ * *previous* run.
+ */
+async listStuckProcessing() : Promise<Result<Conversation[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_stuck_processing") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * "Discard" for a stuck-processing conversation — same atomic delete path
+ * as everything else in this file, so a discard interrupted by *another*
+ * crash is cleaned up by the existing `resume_pending_deletes()` boot pass.
+ */
+async discardStuckProcessing(conversationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discard_stuck_processing", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * "Continue" for a stuck-processing conversation. Unlike mid-recording
+ * recovery there is no partial-audio judgment call to make here — `mic.wav`
+ * /`system.wav` are already complete (capture finished normally; it was the
+ * *pipeline* that got cut off), so this just re-runs the same
+ * `run_post_recording_pipeline` a normal Stop uses, from the top. Simpler
+ * than resuming from the exact last-completed step (transcription is now
+ * fast — W17b's chunking fix — and idempotent to redo), and correct
+ * regardless of whether the crash landed mid-transcription or
+ * mid-extraction.
+ */
+async resumeStuckProcessing(conversationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_stuck_processing", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-runs one conversation's extraction turn (LLD-05 §4.4's idempotent
+ * re-extraction), then — same as the post-recording pipeline — attempts the
+ * project-memory auto-refresh trigger. `force_overwrite` is sourced from the
+ * UI's "Overwrite your edits?" modal confirmation (`pages/04`); the auto
+ * pipeline always calls this with `force_overwrite=false`.
+ */
+async conversationRetryStep(conversationId: string, step: RetryableStep, forceOverwrite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_retry_step", { conversationId, step, forceOverwrite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getConversationDetail(conversationId: string) : Promise<Result<ConversationDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_conversation_detail", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggles one `<ActionItemRow>` checkbox (LLD-11 §3.2). Thin wrapper over
+ * the storage method W4 already shipped but nothing ever called from a
+ * command — Conversation Detail is the first UI surface that renders
+ * action items at all.
+ */
+async conversationSetActionItemDone(actionItemId: string, done: boolean) : Promise<Result<ActionItem, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_set_action_item_done", { actionItemId, done }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Renames a conversation (LLD-11 §3.2 `<EditableTitle>`).
+ */
+async conversationSetTitle(conversationId: string, title: string) : Promise<Result<Conversation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_set_title", { conversationId, title }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Persists Conversation Detail's Notes tab (debug-session patch — the
+ * recording screen's notes draft used to be local-only, LLD-11 §3.1).
+ */
+async conversationSetNotes(conversationId: string, notes: string) : Promise<Result<Conversation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_set_notes", { conversationId, notes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * W17b — Conversation Detail's overflow-menu Delete (12_CORNER_CASES.md
+ * "Data delete flows"). Only `delete_conversation` itself existed before
+ * this (crash-recovery's Discard actions, in `commands::recording`) — a
+ * live user-initiated delete from Conversation Detail had no command of
+ * its own. Thin wrapper: reuses the same atomic, crash-resumable
+ * `enqueue_conversation_delete` path everything else in the app uses, so
+ * there is nothing new to get wrong here.
+ */
+async conversationDelete(conversationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_delete", { conversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Adds a user-authored action item (debug-session patch — previously the
+ * only way an `action_items` row could exist was via extraction).
+ */
+async conversationCreateActionItem(conversationId: string, text: string) : Promise<Result<ActionItem, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_create_action_item", { conversationId, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists conversations — `project_id: None` returns every conversation
+ * regardless of project (Dashboard's "Recent Conversations", which is the
+ * permanent home for unfiled conversations, not a stopgap — W15 design
+ * decision), `Some(id)` scopes to one project (Project Detail), and
+ * `unfiled_only` scopes to conversations with no project at all.
+ * 
+ * Returns one page plus the total it was drawn from, so the caller can
+ * render `Conversations (128)` and `108 remaining` without a second round
+ * trip or a second source of truth.
+ */
+async listConversations(filter: ConversationFilter) : Promise<Result<Page<Conversation>, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_conversations", { filter }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Assigns or reassigns a conversation's project, `None` meaning "no
+ * project" — always a valid, permanent choice (W15 design decision), never
+ * gated on recording having stopped. Purely a DB update: conversation
+ * directories are flat and keyed by id alone
+ * (`fs::paths::recordings_root`), so there is no filesystem move tied to
+ * this anymore. If this conversation is still actively recording, also
+ * updates the live session's cached `project_id` — `stop_recording`'s
+ * post-pipeline memory-refresh trigger reads that cached value to know
+ * which project's memory doc to refresh (LLD-11: the project chip is
+ * editable "before, during, after recording, or never").
+ */
+async conversationSetProject(conversationId: string, projectId: string | null) : Promise<Result<Conversation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_set_project", { conversationId, projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Manual refresh: flushes the pending-count immediately (union of whatever
+ * conversations are currently pending for this project) and enqueues
+ * `refresh_project_memory`. Debounced per §3.1 — a repeat call inside the
+ * 5s window is a no-op that returns the already-enqueued handle instead of
+ * starting a second refresh.
+ */
+async projectRefreshMemory(projectId: string) : Promise<Result<RefreshHandle, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_refresh_memory", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every non-deleted project, pinned first then last-active (LLD-01's
+ * `list_projects` ordering) — backs the left nav's project tree.
+ */
+async listProjects() : Promise<Result<Project[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_projects") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Real "+New Project" (replaces the W6 stub toast). Name-only in v1 — the
+ * description field exists on the model but no UI writes it yet.
+ */
+async createProject(name: string) : Promise<Result<Project, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_project", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getProject(projectId: string) : Promise<Result<Project, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_project", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Project Detail's inline-editable name (`<EditableProjectName>`,
+ * mirroring Conversation Detail's `<EditableTitle>`). Rejects an
+ * empty/whitespace-only name the same way `update_conversation_title`
+ * does — `StorageService::update_project` itself doesn't validate this,
+ * so the check lives here.
+ */
+async projectSetName(projectId: string, name: string) : Promise<Result<Project, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_set_name", { projectId, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * `None` when no refresh has run for this project yet (Project Memory
+ * pane's "empty until first conversation is processed" state, per
+ * `pages/05_PROJECT_MEMORY.md` §1 Overview).
+ */
+async getProjectMemory(projectId: string) : Promise<Result<ProjectMemory | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_project_memory", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Just the size of a scope, for surfaces that render a number and no rows —
+ * the left nav's per-project badges and the Recordings header. Rendering
+ * "128" used to mean fetching 128 rows and taking `.length`, per expanded
+ * project, on every nav render.
+ */
+async countConversations(filter: ConversationFilter) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("count_conversations", { filter }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A standalone action item — Home's "+" (`project_id: None`) or a Project
+ * page's "+" (`project_id: Some`). No conversation, so no `conversationId`
+ * param: there is nothing for this command to attach the item to.
+ * 
+ * `assignee_hint` lets Home self-assign ("You") in the same write that
+ * creates the row — see `insert_standalone_action_item`'s comment for why
+ * that has to be atomic rather than a create-then-assign chain.
+ */
+async createStandaloneActionItem(projectId: string | null, text: string, assigneeHint: string | null) : Promise<Result<ActionItemWithSource, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_standalone_action_item", { projectId, text, assigneeHint }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One page of the action items assigned to the user, across every project
+ * and every unfiled conversation — Home's "Your to-dos". `include_done`
+ * splits Open/Done the same way every other action-item list does.
+ */
+async listMyActionItems(includeDone: boolean, limit: number | null, offset: number) : Promise<Result<Page<ActionItemWithSource>, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_my_action_items", { includeDone, limit, offset }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Sets who owes an action item. Free text, not a contact id, and not
+ * validated against anything: there is no contacts table until v1.3, and the
+ * correction path for a wrong guess must be cheaper than the guess. An empty
+ * or whitespace-only string means "unassigned" and is normalised to `None`
+ * here rather than stored as `""`, which would render as an empty badge.
+ */
+async setActionItemAssignee(itemId: string, assigneeHint: string | null) : Promise<Result<ActionItem, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_action_item_assignee", { itemId, assigneeHint }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Sets who owes the *answer* to an open question. Never touches
+ * `raised_by_hint` — who asked is a fact about the past.
+ */
+async setOpenQuestionOwner(questionId: string, ownerHint: string | null) : Promise<Result<OpenQuestion, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_open_question_owner", { questionId, ownerHint }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Marks an open question answered by this conversation, or reopens it.
+ */
+async setOpenQuestionResolved(questionId: string, resolvedByConversationId: string | null) : Promise<Result<OpenQuestion, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_open_question_resolved", { questionId, resolvedByConversationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Eligible projects (>=5 conversations), sorted by recent activity,
+ * each with its decision/open-question counts over the last
+ * `PULSE_WINDOW_DAYS` days. One round trip — the alternative is one query
+ * per eligible project from the frontend, which is the same N+1 shape W18
+ * spent its whole scope removing from the conversation lists.
+ */
+async dashboardGetProjectPulse() : Promise<Result<ProjectPulseItem[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dashboard_get_project_pulse") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async projectGetMemoryStatus(projectId: string) : Promise<Result<ProjectMemoryStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_get_memory_status", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One page of a project's action items — the model-derived ones (via the
+ * conversations join) and the standalone ones added directly from this
+ * page's own "+". `include_done` splits Open/Done the same way Conversation
+ * Detail's own action items do.
+ */
+async projectListActionItems(projectId: string, includeDone: boolean, limit: number | null, offset: number) : Promise<Result<Page<ActionItemWithSource>, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_list_action_items", { projectId, includeDone, limit, offset }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One page of a project's decision log, oldest first (the order
+ * `list_decisions_global` guarantees — a decision log reads forwards).
+ */
+async projectListDecisions(projectId: string, limit: number | null, offset: number) : Promise<Result<Page<Decision>, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_list_decisions", { projectId, limit, offset }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One page of a project's open questions, newest first.
+ * `resolved_only` backs the Open/Resolved split. The `include_resolved`
+ * filter has existed since W16 and no caller had ever set it, so every
+ * resolved question stayed in the Open list forever; the split needs the
+ * complementary predicate too, so each tab pages and counts on its own.
+ */
+async projectListOpenQuestions(projectId: string, resolvedOnly: boolean, limit: number | null, offset: number) : Promise<Result<Page<OpenQuestionWithSource>, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_list_open_questions", { projectId, resolvedOnly, limit, offset }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The actual `#[tauri::command]` — a thin wrapper over `send_prompt`, see
+ * its doc comment for why the logic lives in a plain function instead.
+ */
+async chatSendPrompt(scope: ChatScopeInput, text: string, channel: TAURI_CHANNEL<AgentEvent>) : Promise<Result<ChatSendPromptAck, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_send_prompt", { scope, text, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops the in-flight turn for `session_id` and kills its runner process
+ * (design doc §2.4 — the runner is a persistent whole-process-per-session
+ * primitive in v1, so "cancel a turn" and "cancel the process" are the same
+ * operation; `ChatRegistry::evict` guarantees the next message in this
+ * session cold-starts a fresh process rather than writing to a dead one's
+ * stdin).
+ */
+async chatCancelTurn(sessionId: string, turnId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_cancel_turn", { sessionId, turnId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns raw journaled events for a session, oldest-first (LLD-12c /
+ * design doc §2.3.1 — deliberately *not* pre-grouped into `Message`s here.
+ * Grouping consecutive `token_delta`s into one assistant message and
+ * pairing `tool_call`/`tool_result` is a pure, side-effect-free projection
+ * that belongs on the frontend next to the render logic it feeds
+ * (`projectHistory` in `src/components/app/chat/`), not duplicated in Rust.
+ */
+async chatGetSessionHistory(sessionId: string, beforeSeq: number | null, limit: number) : Promise<Result<ChatEventRecord[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_get_session_history", { sessionId, beforeSeq, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * "New chat" (06_CHAT.md's `[+]`, currently unwired on the frontend —
+ * design doc US-9): opens a fresh session for `scope`, keeping whichever
+ * session was previously active for it around (renameable, listable via
+ * `chat_list_sessions`) rather than overwriting it.
+ */
+async chatStartNewSession(scope: ChatScopeInput) : Promise<Result<ChatSession, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_start_new_session", { scope }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Renames a chat session (design doc US-7). Rejects an empty/
+ * whitespace-only title — see `StorageService::update_chat_session_title`.
+ */
+async chatRenameSession(sessionId: string, title: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_rename_session", { sessionId, title }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists past chat sessions, newest-updated first, for the history browser
+ * (design doc US-8) — every session, active or superseded by a later
+ * "New chat".
+ */
+async chatListSessions(beforeUpdatedAt: number | null, limit: number) : Promise<Result<ChatSession[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_list_sessions", { beforeUpdatedAt, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Resolves the currently-active session for a scope, if one has ever been
+ * opened — without creating one (unlike `send_prompt`/`start_new_session`,
+ * which both create on miss). Lets the frontend know the real backend
+ * session id for a scope *before* the user sends a first message this app
+ * session — needed to fetch history for a scope you've chatted in before,
+ * and the missing piece that let `chatSessionId` go permanently unset
+ * (nothing ever populated it on mount, only a send's ack could, and a send
+ * required it to already be set — a deadlock; found while wiring the
+ * redesigned chat UI to this command).
+ */
+async chatResolveSession(scope: ChatScopeInput) : Promise<Result<ChatSession | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_resolve_session", { scope }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async onboardingGetStatus() : Promise<Result<OnboardingStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_get_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * W18: the Welcome screen now requires a first name before either of its
+ * exits (Continue, "I've used Mnemos before") proceeds — attribution
+ * (`memory::self_contact`) depends on it, so the "zero form-filling"
+ * `01_ONBOARDING.md` goal lost to that. `last_name` stays optional. The
+ * command itself still accepts `None` for either and doesn't enforce the
+ * requirement server-side: the gate is UX policy for the funnel, not an
+ * invariant of stored settings, so a future editable-in-Settings path isn't
+ * blocked from clearing the name if that's ever wanted.
+ */
+async onboardingSetUserName(firstName: string | null, lastName: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_set_user_name", { firstName, lastName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Called once, landing on Dashboard — sets the flag the root route's
+ * `beforeLoad` guard checks so onboarding never shows again.
+ */
+async onboardingComplete() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_complete") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Dashboard's checklist "Connect" click (or its own dismiss control) — see
+ * `OnboardingStatus.calendar_checklist_dismissed`'s doc comment.
+ */
+async onboardingDismissCalendarChecklist() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_dismiss_calendar_checklist") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Screen 2 — proactive CLI detection, reusing the same PATH-scan
+ * `find_claude_binary` already uses when a chat/extraction runner actually
+ * spawns. Does not attempt to verify login state (see `RunnerKind::detect`'s
+ * doc comment for why) — a not-logged-in CLI is caught by the existing
+ * runtime error path (W8) the first time it's actually used, not gated here.
+ */
+async onboardingCheckClaudeCli() : Promise<RunnerDetection> {
+    return await TAURI_INVOKE("onboarding_check_claude_cli");
+},
+async onboardingCheckPermissions() : Promise<Result<PermissionStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_check_permissions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async onboardingRequestMicPermission() : Promise<Result<PermissionState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_request_mic_permission") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async onboardingRequestScreenPermission() : Promise<Result<PermissionState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_request_screen_permission") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deep-links to the exact System Settings pane for a denied permission
+ * (`01_ONBOARDING.md` Screen 3's "expandable 'How to fix in System
+ * Settings'"). Best-effort: opening a settings pane is not something a
+ * failure here should block onboarding on, so this never returns
+ * `AppError` — it logs and no-ops instead.
+ */
+async onboardingOpenSystemSettings(pane: SettingsPane) : Promise<void> {
+    await TAURI_INVOKE("onboarding_open_system_settings", { pane });
+},
+/**
+ * Screen 4 — subscribes to `model_download_progress` and immediately pushes
+ * a synchronous status snapshot first, so a screen that mounts after the
+ * download already finished (or already started, per Wave-5-Patch's eager
+ * `warm_up()`) doesn't sit on a stuck 0% bar waiting for a change event that
+ * may never come again. No separate "start" command exists — see
+ * `ModelDownloadStatus`'s doc comment for why.
+ */
+async onboardingSubscribeModelDownload(channel: TAURI_CHANNEL<ModelDownloadStatusResponse>) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("onboarding_subscribe_model_download", { channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async trackEvent(event: string, properties: Partial<{ [key in string]: TrackPropertyValue }>) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("track_event", { event, properties }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -31,12 +814,347 @@ async ping() : Promise<Result<Pong, AppError>> {
 
 /** user-defined types **/
 
-export type AppError = { kind: "not_found"; entity: string; id: string } | { kind: "worker_unavailable"; retry_after_ms: number } | { kind: "permission_denied"; permission: string } | { kind: "network"; message: string; correlation_id: string } | { kind: "runner"; runner: string; message: string; correlation_id: string } | { kind: "storage"; message: string; correlation_id: string } | { kind: "validation"; message: string; field: string | null } | { kind: "model"; model: string; message: string; correlation_id: string } | { kind: "cancelled" } | { kind: "internal"; message: string; correlation_id: string }
+export type ActionItem = { id: string; conv_id: string; text: string; assignee_hint: string | null; assignee_source: HintSource; due_hint: string | null; source_ts: number | null; done: boolean; dismissed: boolean; added_manually: boolean; created_at: number; updated_at: number }
+export type ActionItemWithSource = { id: string; 
+/**
+ * `None` for a standalone item (added from Home or a Project page, no
+ * source conversation) — `project_id` below is where it's scoped
+ * instead, when it has a scope at all.
+ */
+conv_id: string | null; project_id: string | null; text: string; assignee_hint: string | null; assignee_source: HintSource; due_hint: string | null; source_ts: number | null; done: boolean; dismissed: boolean; created_at: number }
+/**
+ * The stream envelope (LLD-07 §3.3). A discriminated union versioned by
+ * shape, not an integer — consumers `match` and route unrecognized shapes
+ * to `Notice{Info}` for forwards-compat.
+ */
+export type AgentEvent = 
+/**
+ * A slice of assistant text. Consumers append verbatim.
+ */
+{ kind: "token_delta"; turn_id: string; text: string } | 
+/**
+ * The model emitted a `tool_use` block. v1 has no tool-calling loop
+ * (no MCP config is ever passed to the CLI), so this is purely
+ * informational — logged, never dispatched, no matching `ToolResult`
+ * will ever follow it this wave.
+ */
+{ kind: "tool_call"; turn_id: string; call_id: string; tool_name: string; args: JsonValue; human_readable: string } | 
+/**
+ * Latent in v1 — reserved for W16's tool-calling loop.
+ */
+{ kind: "tool_result"; turn_id: string; call_id: string; ok: boolean; summary: string; raw: JsonValue } | 
+/**
+ * Latent in v1 — no tools ship, so the CLI never emits a
+ * permission-request frame in practice.
+ */
+{ kind: "approval_request"; turn_id: string; request_id: string; tool_name: string; args: JsonValue; destructive: boolean } | 
+/**
+ * Free-form status message. `unknown_x -> Notice{Info}` per SUPERSET.
+ * 
+ * Deviation from LLD-07 §3.3's literal sketch: the field is named
+ * `notice_kind`, not `kind` — the LLD's own sketch names both the
+ * enum's serde tag (`#[serde(tag = "kind")]`) and this field `kind`,
+ * which `specta`/`serde` reject as a tag/field name collision. Wire
+ * shape is otherwise unchanged.
+ */
+{ kind: "notice"; turn_id: string; notice_kind: NoticeKind; text: string } | 
+/**
+ * Terminal success. Consumers stop reading after this.
+ */
+{ kind: "complete"; turn_id: string; stop_reason: StopReason; usage: Usage } | 
+/**
+ * Terminal failure. Consumers stop reading after this.
+ */
+{ kind: "error"; turn_id: string; error: AppError }
+export type AppError = { kind: "not_found"; entity: string; id: string } | { kind: "worker_unavailable"; retry_after_ms: number } | { kind: "permission_denied"; permission: string } | { kind: "network"; message: string; correlation_id: string } | { kind: "runner"; runner: string; message: string; correlation_id: string } | { kind: "storage"; message: string; correlation_id: string } | { kind: "validation"; message: string; field: string | null } | { kind: "model"; model: string; message: string; correlation_id: string } | 
+/**
+ * The runner reached the user's provider-side usage limit — a
+ * *recoverable* refusal, distinct from `Runner` (which means the CLI
+ * crashed, was misconfigured, or returned garbage). Kept separate
+ * because the two need opposite user-facing treatment: `Runner` says
+ * "something is broken", this says "come back when your limit resets;
+ * nothing was lost".
+ * 
+ * `Display` is the bare message, no variant prefix — it is written to
+ * `pipeline_state.error` and rendered verbatim to the user by
+ * Conversation Detail's failure banner.
+ */
+{ kind: "runner_blocked"; runner: string; resets_at: number | null; message: string; correlation_id: string } | { kind: "cancelled" } | { kind: "internal"; message: string; correlation_id: string }
+/**
+ * One journal row's payload. The event shape itself belongs to LLD-07/12c;
+ * this layer only guarantees journal-then-projection atomicity around it.
+ * `Type` (W13-history wave): exposed to the frontend via
+ * `chat_get_session_history` so `MessageList` can project real history
+ * instead of the permanent `[]` stub it used before.
+ */
+export type ChatEventRecord = { session_id: string; epoch: string; seq: number; ts: number; event_json: JsonValue }
+export type ChatScopeInput = { scope_type: "everything" } | { scope_type: "project"; project_id: string } | { scope_type: "conversation"; conversation_id: string }
+export type ChatScopeType = "everything" | "project" | "conversation"
+export type ChatSendPromptAck = { session_id: string }
+/**
+ * `Type` (W13-history wave): exposed to the frontend by
+ * `chat_start_new_session`/`chat_list_sessions` (design doc §2.5, §4).
+ */
+export type ChatSession = { id: string; runner_id: string | null; scope_type: ChatScopeType; scope_id: string | null; session_id: string | null; epoch: string; status: string; title: string | null; 
+/**
+ * `None` = this is the active session for its `(runner, scope)` —
+ * `find_chat_session_by_scope` only ever returns one of these.
+ * `Some(id)` = a previous "New chat" (`start_new_session`) replaced
+ * this row with `id`; still renameable/listable, just not the one a
+ * new message resolves to (design doc §2.5).
+ */
+superseded_by_id: string | null; message_count: number; total_input_tokens: number; total_output_tokens: number; cost_micros: number; created_at: number; updated_at: number }
+export type Conversation = { id: string; 
+/**
+ * Recordings never require a project (W15 design decision) — `None`
+ * means unfiled, a first-class, permanent state, not a placeholder.
+ */
+project_id: string | null; title: string; started_at: number; ended_at: number | null; duration_s: number | null; status: ConversationStatus; runner_id: string | null; starred: boolean; archived: boolean; notes: string | null; deleted_at: number | null; created_at: number; updated_at: number }
+/**
+ * Everything Conversation Detail (W12b, LLD-11 §3.2) renders in one round
+ * trip. `transcript`/`summary_markdown` are `None` until the pipeline has
+ * written them (`transcribing`/`extracting` respectively) — the route
+ * falls back to `<ProcessingOverlay>` + `processing-progress` events for
+ * the in-between state, so a `None` here just means "not there yet", not
+ * an error.
+ */
+export type ConversationDetail = { conversation: Conversation; 
+/**
+ * `None` when the conversation has no project assigned — a permanent,
+ * valid state (W15 design decision), not "not loaded yet".
+ */
+project_name: string | null; pipeline_step: PipelineStep | null; pipeline_error: string | null; transcript: TranscriptDoc | null; summary_markdown: string | null; action_items: ActionItem[]; decisions: Decision[]; open_questions: OpenQuestion[] }
+/**
+ * W18: every field past `include_archived` was added to make the six
+ * unbounded `list_conversations` callers bounded. `limit: None` still means
+ * "every row" and is deliberately kept, not removed — a few internal callers
+ * (crash-recovery scans) genuinely want the whole set and are bounded by
+ * something other than library size. What is *not* allowed is a UI surface
+ * leaving it `None`.
+ */
+export type ConversationFilter = { 
+/**
+ * `None` = every project (Everything scope). Note this is not the same
+ * as `unfiled_only`: `None` includes filed *and* unfiled conversations.
+ */
+project_id: string | null; 
+/**
+ * `project_id IS NULL` — the Recordings page's "unfiled" scope (W15:
+ * unfiled is a permanent first-class state, never a project).
+ */
+unfiled_only: boolean; include_archived: boolean; starred_only: boolean; 
+/**
+ * Inclusive bounds on `started_at`.
+ */
+since: number | null; until: number | null; 
+/**
+ * Case-insensitive substring match on the title. Deliberately `LIKE`
+ * rather than the FTS5 index: FTS is a ranked keyword search over four
+ * content kinds and cannot be composed with these filters or with
+ * `LIMIT`/`OFFSET` paging without ranking the whole corpus first. Title
+ * filtering here is a *filter*, not a search — ⌘K remains the search.
+ */
+title_query: string | null; order: ConversationOrder; 
+/**
+ * `None` = unbounded. Every UI caller must set it.
+ */
+limit: number | null; offset: number }
+/**
+ * Sort order for [`ConversationFilter`]. Sorting is a *query* concern, not a
+ * view concern: once a list is a page rather than the whole set, sorting it
+ * in the client sorts only the rows that happen to be loaded, which is worse
+ * than not sorting at all.
+ */
+export type ConversationOrder = 
+/**
+ * Most recent first — every list surface's default.
+ */
+"started_desc" | "started_asc"
+export type ConversationStatus = "recording" | "processing" | "ready" | "failed"
+/**
+ * Read model for a `decisions` row (LLD-01 §3.1 sketches this; W4's
+ * Implementation status never added it — only `ActionItem` got a read
+ * struct — because nothing read decisions back before W12b's Conversation
+ * Detail page. Added here, following `ActionItem`'s shape.
+ */
+export type Decision = { id: string; 
+/**
+ * `None` for a standalone decision (schema supports it — see
+ * `action_items`' migration comment — though nothing creates one yet;
+ * only action items have a "+" as of W19).
+ */
+conv_id: string | null; project_id: string | null; statement: string; quote: string | null; decided_by_hint: string | null; source_ts: number | null; added_manually: boolean; created_at: number }
+/**
+ * Provenance of a `*_hint` a person can edit. The distinction is load-bearing:
+ * `replace_extraction_rows` rebuilds every model-derived row on a
+ * re-extraction, so without this flag a user's correction is indistinguishable
+ * from the guess it replaced and gets thrown away with it.
+ */
+export type HintSource = "model" | "manual"
+export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
+/**
+ * 100ms mic/system dB sample streamed to the React level meter, mirroring
+ * `LevelSample` in `src/ipc/streams.ts` field-for-field.
+ */
+export type LevelSample = { session_id: number; mic_db: number; system_db: number }
+export type ModelDownloadStatusResponse = { model_id: string; received_bytes: number; total_bytes: number; done: boolean }
+export type NoticeKind = "Info" | "Warn" | "RateLimit"
+export type OnboardingStatus = { has_onboarded: boolean; user_first_name: string | null; user_last_name: string | null; 
+/**
+ * Dashboard's first-run checklist (`01_ONBOARDING.md`'s "Landing"
+ * section) has two rows: "record your first conversation" — derived
+ * for free from whether any conversation exists, never stored here —
+ * and "connect your calendar," which this field tracks. Calendar
+ * *integration* itself is v1.4 (W17); v1 has nothing to actually
+ * connect, so "Connect" navigates to the `/integrations` stub and
+ * clicking it is treated as satisfying the row (there is no real
+ * "connected" signal in v1 to check against instead).
+ */
+calendar_checklist_dismissed: boolean }
+/**
+ * Read model for an `open_questions` row — same rationale as [`Decision`].
+ */
+export type OpenQuestion = { id: string; conv_id: string; question: string; raised_by_hint: string | null; 
+/**
+ * Who owes the answer — distinct from `raised_by_hint`, which records
+ * who asked and is never edited. The model never populates this in v1.
+ */
+owner_hint: string | null; owner_source: HintSource; source_ts: number | null; resolved_conv_id: string | null; resolved_at: number | null; added_manually: boolean; created_at: number }
+export type OpenQuestionWithSource = { id: string; 
+/**
+ * `None` for a standalone question — same rationale as
+ * [`ActionItemWithSource::conv_id`].
+ */
+conv_id: string | null; project_id: string | null; question: string; raised_by_hint: string | null; 
+/**
+ * Who owes the answer — distinct from `raised_by_hint`, which records
+ * who asked and is never edited. The model never populates this in v1.
+ */
+owner_hint: string | null; owner_source: HintSource; source_ts: number | null; resolved_conv_id: string | null; resolved_at: number | null; created_at: number }
+/**
+ * One page of a list, plus the size of the full result set the page was
+ * drawn from. `total` is what lets a section title read `Conversations (128)`
+ * and a reveal control read `108 remaining` without loading 128 rows to
+ * count them — it is computed by a `COUNT(*)` over the same filter, in the
+ * same call, so the count and the rows can never disagree.
+ */
+export type Page<T> = { items: T[]; total: number }
+export type PermissionState = "granted" | "denied" | "undetermined" | 
+/**
+ * Windows: v1 has no verified proactive check for this permission (see
+ * module doc). Onboarding treats this the same as `Granted` for gating
+ * purposes — never blocks Continue on something it cannot actually
+ * verify — while still rendering distinctly so the UI doesn't claim a
+ * grant that was never confirmed.
+ */
+"not_applicable"
+export type PermissionStatus = { mic: PermissionState; screen: PermissionState }
+export type PipelineStep = "finalizing" | "transcribing" | "extracting" | "done" | "failed"
 /**
  * Reply from [`ping`]. `worker_ready` is hard-coded `false` until W5 owns the
  * Python worker handle; the field exists now so the shape doesn't change then.
  */
 export type Pong = { app_version: string; worker_ready: boolean }
+export type Project = { id: string; name: string; description: string | null; pinned: boolean; archived: boolean; deleted_at: number | null; created_at: number; updated_at: number }
+/**
+ * `project_memory.json`'s shape (LLD-05 §5.3 / `pages/05_PROJECT_MEMORY.md`
+ * "Storage schema"). Read-only render this wave — the inline-editable
+ * prose blocks §Editing behavior describes are a later wave.
+ * 
+ * `supersessions` stays untyped `Value` deliberately, matching
+ * `ipc::python::ExtractMemoryResponse`'s own `Vec<Value>` — it comes
+ * straight from the worker's LLM response with no schema enforced on it
+ * anywhere in the pipeline, so a typed struct here would be one bad
+ * generation away from failing to parse the whole file (real bug hit this
+ * wave: `last_refresh_at` is `unix_now()`, an `i64`, not the ISO-string the
+ * page doc's example sketch showed — `memory::refresh_project` writes it
+ * directly, verified against a real `project_memory.json` on disk).
+ */
+export type ProjectMemory = { overview_markdown: string; scope_drift_markdown: string; supersessions?: JsonValue[]; last_refresh_at: number | null; last_refresh_runner: string | null }
+/**
+ * Whether this project's synthesized memory is behind, and whether the last
+ * attempt to catch it up failed.
+ * 
+ * `pending_count` alone is not a problem signal: refreshes batch (see
+ * `DEFAULT_REFRESH_EVERY_N`), so a couple of pending conversations is the
+ * system working. `last_error` is the signal — it is set only when a refresh
+ * actually failed and cleared the moment one succeeds. The UI shows its
+ * staleness banner on `last_error.is_some()`, never on `pending_count > 0`,
+ * so a healthy backlog stays invisible and the one message that matters
+ * keeps its meaning.
+ */
+export type ProjectMemoryStatus = { 
+/**
+ * Conversations recorded since the last synthesis, i.e. how far behind
+ * the Overview currently is.
+ */
+pending_count: number; 
+/**
+ * How many `pending_count` has to reach before the next rewrite. Sent
+ * to the UI so it can state the cadence instead of leaving a stale
+ * Overview looking broken.
+ */
+refresh_threshold: number; last_error: string | null }
+/**
+ * Home's "Project pulse" (`02_DASHBOARD_AND_NAV.md`'s PROJECT PULSE
+ * section) — one row per project active enough to be worth surfacing, with
+ * what changed recently.
+ */
+export type ProjectPulseItem = { project_id: string; project_name: string; decisions_recent: number; open_questions_recent: number; last_activity_at: number | null }
+export type RecoverInterruptedResult = { 
+/**
+ * `true` when there was nothing worth recovering (see doc comment
+ * below) and the row was auto-discarded instead of being sent through
+ * the pipeline — the frontend shows a different toast for this case
+ * than for "recovery started".
+ */
+discarded_no_audio: boolean }
+export type RefreshHandle = { enqueued_at_ms: number; batch_signature: string }
+export type RetryableStep = "extraction"
+export type RunnerDetection = { installed: boolean; path: string | null }
+export type SettingsPane = "microphone" | "screen_recording"
+export type StartRecordingResult = { session_id: number; conversation_id: string; 
+/**
+ * Always `None` at start — recordings never require a project (W15
+ * design decision). Assignable any time via the project chip.
+ */
+project_id: string | null; started_at_ms: number }
+export type StopReason = "EndTurn" | "MaxTokens" | "StopSequence" | "ToolUse" | "Cancelled"
+export type StopRecordingResult = { conversation_id: string; 
+/**
+ * True when the recording had under 5s of audio in both files —
+ * mirrors `recover_interrupted_recording`'s and the capture-failure
+ * path's identical threshold (LLD-03 §9 failure mode #2). The
+ * conversation row is deleted rather than handed to a pipeline that
+ * would either crash on an effectively-empty WAV or produce a useless
+ * empty transcript. The frontend shows a toast and stays put instead
+ * of navigating to a conversation that no longer exists.
+ */
+discarded_no_audio: boolean }
+export type TrackPropertyValue = boolean | number | string
+/**
+ * One turn streamed to the React `LiveTranscriptStream` (LLD-10 §5.1's
+ * `TranscriptChunk`, mirrored field-for-field so `useLiveTranscriptChannel`
+ * needs no change to consume the real transport).
+ */
+export type TranscriptChunk = { session_id: number; speaker_label_hint: string | null; text: string; ts_start_ms: number; ts_end_ms: number; 
+/**
+ * Client-side supersede-in-place logic already lives in
+ * `useRecordingStore.appendTranscript` (matching `tsStartMs` +
+ * text-prefix) — this transport never needs to flag it itself.
+ */
+superseded: boolean }
+export type TranscriptDoc = { schema_version: number; conversation_id: string; duration_ms: number; turns: TranscriptTurn[] }
+/**
+ * One turn of `transcript.json` (LLD-03 §6.2's real shape, verified against
+ * `mnemos_worker/jobs/process_conversation.py::merge_transcripts` — not the
+ * LLD's sketch, which this wave's brief flagged as possibly stale).
+ * `speaker_label` is `"You"` (mic) / `"Them"` (system) only in v1 — no
+ * diarization model runs yet, so `speaker_label_source` is always
+ * `"source_file"` and `contact_id` is always `null`.
+ */
+export type TranscriptTurn = { text: string; ts_start_ms: number; ts_end_ms: number; source: string; speaker_label: string; speaker_label_source: string; contact_id: string | null }
+export type Usage = { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number | null; cache_read_input_tokens: number | null }
 
 /** tauri-specta globals **/
 

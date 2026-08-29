@@ -12,6 +12,13 @@ pub struct LogGuard(#[allow(dead_code)] tracing_appender::non_blocking::WorkerGu
 
 /// Initializes the global subscriber. Call once, early in `setup()`.
 pub fn init(log_dir: PathBuf) -> std::io::Result<LogGuard> {
+    init_named(log_dir, "tauri")
+}
+
+/// Same as [`init`] but with a caller-chosen log filename prefix — used by
+/// `mnemos-mcp-server` (W16 / LLD-08 §8) to write `mcp-server.log` instead
+/// of `tauri.log` so the two processes' logs don't interleave in one file.
+pub fn init_named(log_dir: PathBuf, prefix: &str) -> std::io::Result<LogGuard> {
     std::fs::create_dir_all(&log_dir)?;
 
     // BACKEND §7 asks for 10MB size-rotation, 5 files retained.
@@ -19,7 +26,7 @@ pub fn init(log_dir: PathBuf) -> std::io::Result<LogGuard> {
     // 5-file cap; swap in a size-rotating writer when log volume justifies it.
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("tauri")
+        .filename_prefix(prefix)
         .filename_suffix("log")
         .max_log_files(5)
         .build(&log_dir)
