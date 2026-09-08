@@ -1,9 +1,9 @@
-//! Token-bucket rate limiter (LLD-08 §6 step 3): 60 tokens, refill 1/sec,
+//! Token-bucket rate limiter: 60 tokens, refill 1/sec,
 //! keyed by `(client_pid, tool_name)`.
 //!
 //! One `mnemos-mcp-server` process serves exactly one stdio client for its
-//! whole lifetime (LLD-08 §4 — "each [external client] gets its own
-//! `mnemos-mcp-server` process"), so `client_pid` is a constant for this
+//! whole lifetime (each external client gets its own
+//! `mnemos-mcp-server` process), so `client_pid` is a constant for this
 //! process and the bucket only needs to be keyed by tool name.
 
 use std::collections::HashMap;

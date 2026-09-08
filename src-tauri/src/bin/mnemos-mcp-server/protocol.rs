@@ -1,15 +1,15 @@
 //! Hand-rolled MCP JSON-RPC 2.0 wire types (stdio transport).
 //!
-//! LLD-08 §11 Q4 flags the Rust MCP SDK ecosystem (`rmcp`) as PROVISIONAL
-//! and names a ~400 LOC hand-rolled server as the fallback if it isn't
+//! The Rust MCP SDK ecosystem (`rmcp`) was PROVISIONAL when this was
+//! written, with a ~400 LOC hand-rolled server as the fallback if it isn't
 //! production-ready. This binary takes that fallback directly rather than
 //! spending build-time/version-risk budget evaluating an early-ecosystem
 //! crate: the surface this server needs is small (`initialize`, `tools/list`,
-//! `tools/call`, plus graceful shutdown) and is fully specified by LLD-08 §3.
+//! `tools/call`, plus graceful shutdown).
 //!
-//! Framing: newline-delimited JSON, one JSON-RPC message per line (LLD-08
-//! §4 — "line-delimited JSON, not LSP Content-Length; MCP's own
-//! convention"), not the LSP-style `Content-Length` header framing used
+//! Framing: newline-delimited JSON, one JSON-RPC message per line
+//! ("line-delimited JSON, not LSP Content-Length; MCP's own convention"),
+//! not the LSP-style `Content-Length` header framing used
 //! elsewhere in this codebase for the worker/runner IPC.
 
 use serde::{Deserialize, Serialize};
@@ -68,10 +68,10 @@ pub struct JsonRpcError {
 
 /// Standard JSON-RPC 2.0 codes this server actually emits. Tool-level
 /// failures (validation, not-found, rate-limit, timeout) are never
-/// JSON-RPC protocol errors — LLD-08 §6.1: they're structured
+/// JSON-RPC protocol errors — they're structured
 /// `isError: true` tool results so the calling model can recover. The only
 /// protocol-level error this server returns is `METHOD_NOT_FOUND`, which
-/// doubles as the read-only enforcement mechanism (LLD-08 §7): there is no
+/// doubles as the read-only enforcement mechanism: there is no
 /// write-shaped method registered at all, so any client guess 404s.
 pub mod error_codes {
     pub const PARSE_ERROR: i64 = -32700;

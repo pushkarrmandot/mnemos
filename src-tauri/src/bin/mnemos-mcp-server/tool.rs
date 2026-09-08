@@ -1,17 +1,17 @@
-//! The `mnemos_tool` wrapper (LLD-08 §6) — validation, correlation id,
+//! The `mnemos_tool` wrapper — validation, correlation id,
 //! rate limiting, timing, error mapping, and a no-content analytics event,
 //! run in that order around every tool handler.
 //!
-//! LLD-08 §6 sketches this as a `#[mnemos_tool(...)]` attribute macro (the
-//! Rust equivalent of Superset's `defineTool`). A real attribute macro
-//! needs its own `proc-macro = true` crate, which forces a Cargo workspace
-//! — directly contradicting `BACKEND_STANDARDS.md` §1's "single crate, not
+//! A `#[mnemos_tool(...)]` attribute macro (the
+//! Rust equivalent of Superset's `defineTool`) was considered, but a real
+//! attribute macro needs its own `proc-macro = true` crate, which forces a
+//! Cargo workspace — directly contradicting the "single crate, not
 //! a workspace" mandate for the whole Rust side (justified there by v1 LOC
 //! scale). This binary gets the identical *runtime* behavior — every
-//! responsibility LLD-08 §6 lists, executed in the same order — from a
+//! responsibility executed in the same order — from a
 //! plain higher-order function instead of a compile-time macro. Adding a
-//! tool is still "one function + one registration entry" (§6's stated
-//! goal); it just isn't `inventory::submit!`-collected at compile time.
+//! tool is still "one function + one registration entry"; it just isn't
+//! `inventory::submit!`-collected at compile time.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -48,8 +48,8 @@ impl ToolError {
         }
     }
 
-    /// User-facing message (LLD-08 §6 step 6 — no correlation id in this
-    /// string; it's already in the log line that produced the error).
+    /// User-facing message — no correlation id in this
+    /// string; it's already in the log line that produced the error.
     fn user_message(&self) -> String {
         match self {
             Self::Validation { message, field } => match field {
@@ -63,8 +63,8 @@ impl ToolError {
     }
 
     /// Full detail (unlike [`Self::user_message`]) — logged, never sent to
-    /// the client (LLD-08 §6 step 6: "no correlation id in the user-visible
-    /// message — the model doesn't need it; it's in the log").
+    /// the client: no correlation id in the user-visible
+    /// message — the model doesn't need it; it's in the log.
     fn log_detail(&self) -> &str {
         match self {
             Self::Validation { message, .. }
@@ -75,7 +75,7 @@ impl ToolError {
     }
 }
 
-/// `AppError` -> `ToolError` (LLD-08 §6 step 6's error-mapping table).
+/// `AppError` -> `ToolError` error-mapping.
 impl From<AppError> for ToolError {
     fn from(err: AppError) -> Self {
         match err {
@@ -95,12 +95,12 @@ pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: serde_json::Value,
-    /// LLD-08 §9.2: 15s for search/list variants, 5s for single-entity gets.
+    /// 15s for search/list variants, 5s for single-entity gets.
     pub timeout: Duration,
 }
 
 /// Runs `handler` with the full `#[mnemos_tool]`-equivalent wrapper
-/// (LLD-08 §6, steps 1-8 minus step 1 argument parsing, which callers do
+/// (argument parsing, which callers do
 /// themselves via `serde_json::from_value` before calling this — see
 /// `tools.rs`). Returns the MCP `tools/call` result shape directly:
 /// `(structured content, isError)`.
@@ -161,7 +161,7 @@ where
         }
     };
 
-    // LLD-08 §6 step 7 — fire-and-forget, no content, opt-out respected
+    // Fire-and-forget, no content, opt-out respected
     // (`Metrics::track` no-ops outright when the `metrics.enabled` setting
     // is off). `Metrics::track` also always logs a debug echo of exactly
     // these fields before attempting to send, so this remains the

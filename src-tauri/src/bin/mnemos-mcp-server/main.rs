@@ -1,19 +1,18 @@
-//! `mnemos-mcp-server` — standalone MCP server (LLD-08 MCP Bridge, W16).
+//! `mnemos-mcp-server` — standalone MCP server.
 //!
 //! Links `mnemos_tauri_lib` directly (see `Cargo.toml`'s `[[bin]]` doc
 //! comment for why this is a second binary target in the same package
 //! rather than a new workspace crate) and opens SQLite **read-only**
 //! (`PRAGMA query_only=1`) alongside the main app's writer pool — WAL
-//! allows this cleanly (LLD-01 §4). No Tauri runtime, no window, no
+//! allows this cleanly. No Tauri runtime, no window, no
 //! Python/Swift subprocess, no network listener: stdio JSON-RPC only.
 //!
-//! v1 tier (per this wave's brief): `mnemos.search` is FTS5 keyword-only.
-//! There is no vector index yet (that's W14/v1.2) and no `mcp_bridge` IPC
-//! hop to the running app (LLD-08 §5.3) — the app-side UDS listener that
-//! hop needs is itself an unbuilt forward-reference (LLD-08 §5.3 flags its
-//! owner as TBD), so wiring a client for it here would dial a socket that
-//! can never exist yet. `mnemos.search` therefore always runs the
-//! in-process FTS5 path and always reports `partial: true` — see
+//! v1 tier: `mnemos.search` is FTS5 keyword-only.
+//! There is no vector index yet (that's v1.2) and no `mcp_bridge` IPC
+//! hop to the running app — the app-side UDS listener that
+//! hop needs is itself unbuilt, so wiring a client for it here would dial
+//! a socket that can never exist yet. `mnemos.search` therefore always runs
+//! the in-process FTS5 path and always reports `partial: true` — see
 //! `tools.rs::search`.
 
 mod protocol;
@@ -31,9 +30,9 @@ use rate_limit::RateLimiter;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// What startup found (LLD-08 §8 steps 2-3 / §9.6). `Ready` is the only
+/// What startup found. `Ready` is the only
 /// variant where tools actually touch storage; the other two make every
-/// `tools/call` short-circuit to a structured `isError` (§5.2) while
+/// `tools/call` short-circuit to a structured `isError` while
 /// `initialize`/`tools/list` still succeed so a client can at least see
 /// what's wrong.
 enum Readiness {
@@ -86,7 +85,7 @@ fn parse_argv() -> Result<Argv, String> {
                 out.log_level = Some(v);
             }
             other if other.starts_with("--transport") => {
-                // LLD-08 §7: network exposure is refused outright. stdio is
+                // Network exposure is refused outright. stdio is
                 // the only transport this binary implements at all — there
                 // is no code path that could bind a socket regardless of
                 // what's passed here, but reject explicitly so a
@@ -187,7 +186,7 @@ async fn run_stdio_loop(
     loop {
         let line = match lines.next_line().await {
             Ok(Some(l)) => l,
-            Ok(None) => break, // stdin EOF: parent closed the pipe (LLD-08 §8 shutdown)
+            Ok(None) => break, // stdin EOF: parent closed the pipe (shutdown)
             Err(e) => {
                 tracing::error!(error = ?e, "stdin read error");
                 break;
@@ -235,7 +234,7 @@ async fn handle_request(
             tools_call_result(req.params, readiness, limiter, metrics).await,
         )),
         "shutdown" => Some(JsonRpcResponse::ok(id, json!({}))),
-        // LLD-08 §7: every write-shaped request (a future v2 tool guessed
+        // Every write-shaped request (a future v2 tool guessed
         // early, or any method this server never implements) 404s — no
         // partial writes, no silent no-op. This is the read-only
         // enforcement mechanism at the protocol level.

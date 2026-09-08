@@ -1,6 +1,6 @@
-//! The 7 v1 tools (LLD-08 §3). Each tool is one function + one entry in
+//! The 7 v1 tools. Each tool is one function + one entry in
 //! [`ALL_TOOLS`] — see `tool.rs`'s module doc for why that's a plain table
-//! instead of the LLD's `#[mnemos_tool]` + `inventory::submit!` sketch.
+//! instead of a `#[mnemos_tool]` + `inventory::submit!` macro approach.
 
 use std::time::Duration;
 
@@ -133,8 +133,7 @@ pub fn all_tools() -> Vec<ToolSpec> {
     ]
 }
 
-/// The `initialize` response's `instructions` field, verbatim per LLD-08
-/// §3.8.
+/// The `initialize` response's `instructions` field, verbatim.
 pub const INSTRUCTIONS: &str = "Mnemos is a local-first meeting memory. Use these tools to \
     answer questions about the user's meetings, decisions, action items, and project context. \
     Discovery order: call mnemos.list_projects when you need to scope by project and don't yet \
@@ -205,9 +204,9 @@ fn optional_iso8601(args: &Value, field: &str) -> Result<Option<i64>, ToolError>
     }
 }
 
-/// Rejects `contact_id` up front (LLD-08 §3.6/§3.7 sketch this filter, but
-/// it resolves through `speakers.contact_id` — a table that doesn't exist
-/// until v1.3 diarization/contacts; see LLD-01's Implementation status).
+/// Rejects `contact_id` up front — it resolves through
+/// `speakers.contact_id`, a table that doesn't exist until v1.3
+/// diarization/contacts.
 fn reject_contact_id(args: &Value) -> Result<(), ToolError> {
     if args.get("contact_id").is_some() {
         return Err(ToolError::field(
@@ -220,7 +219,7 @@ fn reject_contact_id(args: &Value) -> Result<(), ToolError> {
 }
 
 /// Dispatches one `tools/call`. Callers only reach this once `main.rs` has
-/// confirmed the data directory is ready (LLD-08 §8 startup steps 2-3) —
+/// confirmed the data directory is ready —
 /// the not-initialized / schema-too-old `isError` short-circuit lives in
 /// `main.rs::tools_call_result`, one level up, since it applies before
 /// there's even a `&dyn StorageService` to hand a tool.
@@ -325,8 +324,8 @@ struct SearchArgsProbe {
 }
 
 async fn search(storage: &dyn StorageService, args: Value) -> Result<Value, ToolError> {
-    // Validate `query` is present/typed before touching storage (LLD-08
-    // §6 step 1's intent) — `serde_json::from_value` round-trip just to
+    // Validate `query` is present/typed before touching storage —
+    // `serde_json::from_value` round-trip just to
     // surface a field-scoped error the same shape every other handler uses.
     serde_json::from_value::<SearchArgsProbe>(args.clone())
         .map_err(|e| ToolError::field(e.to_string(), "query"))?;
@@ -408,8 +407,7 @@ async fn get_conversation_summary(
         "ended_at": conv.ended_at,
         "duration_s": conv.duration_s,
         "summary_md": summary,
-        // No `speakers`/`contacts` table until v1.3 diarization — see
-        // this wave's Implementation status entry for LLD-08.
+        // No `speakers`/`contacts` table until v1.3 diarization.
         "participants": [],
     }))
 }
@@ -430,9 +428,8 @@ async fn list_recent_conversations(
         ..Default::default()
     };
     let total = storage.count_conversations(filter.clone()).await?;
-    // W18: this used to load every conversation in the database and then
-    // `.take(limit)` the result, so the cost of answering "show me the last
-    // 20" grew with the size of the archive.
+    // Storage applies the limit/offset itself, so the cost of answering
+    // "show me the last 20" stays independent of the size of the archive.
     let convs = storage.list_conversations(filter).await?;
     let returned = convs.len();
     let projects = storage
@@ -507,7 +504,13 @@ async fn list_action_items(storage: &dyn StorageService, args: Value) -> Result<
             project_id,
             since,
             until,
-            include_done,
+            // `false` (the default) means open-only; `true` means "also
+            // include done ones" — i.e. no restriction at all, which is
+            // exactly what an agent that doesn't specify a status expects.
+            // The storage-layer filter is `Option<bool>` precisely so this
+            // caller can ask for "everything," unlike Home/the Project
+            // page's Open/Done tabs, which are always an exact match.
+            done: if include_done { None } else { Some(false) },
             // Not exposed to the agent yet — "assigned to the person running
             // this tool" has no meaning for an MCP caller.
             assigned_to_me: false,
@@ -526,7 +529,6 @@ async fn list_action_items(storage: &dyn StorageService, args: Value) -> Result<
                 "assignee_hint": i.assignee_hint,
                 "due_hint": i.due_hint,
                 "done": i.done,
-                "dismissed": i.dismissed,
                 "source_conversation_id": i.conv_id,
                 "project_id": i.project_id,
                 "source_ts": i.source_ts,
