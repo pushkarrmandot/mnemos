@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Mnemos records the audio your Mac plays so it can transcribe what other people say in your meetings. Audio stays on this Mac and is never uploaded.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Mnemos records your microphone so it can transcribe your meetings. Audio stays on this Mac and is never uploaded.</string>
+</dict>
+</plist>

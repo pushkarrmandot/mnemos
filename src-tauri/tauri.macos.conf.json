@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "resources": {
+      "bundled/python-macos-arm64/": "python/"
+    },
+    "externalBin": ["binaries/mnemos-audio", "binaries/mnemos-meeting-watcher"],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}

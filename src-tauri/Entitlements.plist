@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Hardened runtime is required for Apple notarization, but it denies
+	  capabilities by default, including microphone access, regardless of
+	  what Info.plist declares or what the user grants in System Settings.
+	  Every entitlement below re-enables something the app genuinely needs
+	  and hardened runtime would otherwise block. Without this file, a signed
+	  build silently fails to capture audio while an unsigned dev build works
+	  fine, because dev builds don't enable hardened runtime at all.
+	-->
+
+	<!-- Audio capture. The Swift sidecar (mnemos-audio) does the actual
+	     recording, but it runs as a child of the main app and TCC attributes
+	     the request to this bundle, so the entitlement belongs on both. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!-- The bundled Python interpreter dlopens ~230 compiled extension
+	     modules (numpy, scipy, onnxruntime, mlx). Hardened runtime's library
+	     validation rejects any library whose Team ID doesn't match the main
+	     binary's; scripts/sign_python_bundle.sh re-signs them all with our
+	     identity, but Metal and system frameworks that mlx pulls in at
+	     runtime are outside that set, so validation still has to be relaxed
+	     here. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- WebKit (the Tauri webview) JITs JavaScript, and mlx JIT-compiles
+	     Metal kernels for on-device transcription. Both need writable
+	     executable memory, which hardened runtime blocks by default. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- The Python worker is spawned with a configured environment
+	     (interpreter path, PYTHONHOME/PYTHONPATH for the bundled tree).
+	     Hardened runtime strips dyld-affecting variables without this. -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

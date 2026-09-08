@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "bundled/python-windows-x64/": "python/"
+    }
+  }
+}
