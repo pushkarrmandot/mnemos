@@ -1,0 +1,70 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. The more concrete the repro, the faster it gets fixed.
+  - type: textarea
+    id: description
+    attributes:
+      label: What's wrong
+      description: A clear, concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: e.g. macOS 14.5, Windows 11 23H2
+    validations:
+      required: true
+  - type: input
+    id: mnemos-version
+    attributes:
+      label: Mnemos version
+      description: Shown in Settings → Updates.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: >-
+        Paste any relevant log output, stack traces, or screenshots. Logs live
+        under `~/Mnemos/logs` (macOS/Linux) or `%LOCALAPPDATA%\Mnemos\logs`
+        (Windows).
+      render: shell
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might be relevant.

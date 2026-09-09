@@ -1,12 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Mnemos">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1568 1568" role="img" aria-label="Mnemos">
   <!--
-    Mnemos app mark. BRAND.md: the name is the muse of memory; the palette is
-    the warm copper accent from DESIGN_SYSTEM.md §2. One letterform, one
-    stroke, no gradient — "every pixel earns its place" (§1.5). Drawn heavy
-    enough that the M survives the 16×16 menu-bar render.
+    Mnemos app icon. BRAND.md: the name is the muse of memory; the copper is
+    the accent from DESIGN_SYSTEM.md §2. Two overlapping strands read the M as
+    one continuous ribbon folded back on itself — memory doubling back.
+
+    This is the *packaged* mark: it carries its own copper canvas because the
+    OS renders one fixed icon against the user's wallpaper, not against our UI
+    (it is never theme-swapped). The bare, theme-aware mark used inside the
+    product lives in src/components/app/shell/Logo.tsx.
+
+    Depth is a soft gradient plus one overlap shadow — no specular, no chrome.
+    Source of truth for src-tauri/icons/*; regenerate with `pnpm tauri icon`.
   -->
-  <rect width="1024" height="1024" rx="224" fill="#C4753A"/>
-  <path d="M304 712V336l208 208 208-208v376"
-        fill="none" stroke="#FCFBF9" stroke-width="92"
-        stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="canvas" gradientUnits="userSpaceOnUse" x1="180" y1="120" x2="1400" y2="1460">
+      <stop offset="0" stop-color="#b96733"/>
+      <stop offset="0.55" stop-color="#a45528"/>
+      <stop offset="1" stop-color="#8c441c"/>
+    </linearGradient>
+
+    <!-- Front strands catch the light; back strands sit a half-step down so
+         the crossing still reads as an overlap at a single hue. -->
+    <linearGradient id="frontL" gradientUnits="userSpaceOnUse" x1="295.9" y1="434.5" x2="484.1" y2="540.5">
+      <stop offset="0" stop-color="#ebdbc0"/>
+      <stop offset="0.32" stop-color="#fbf3e4"/>
+      <stop offset="0.6" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#e4d0af"/>
+    </linearGradient>
+    <linearGradient id="backL" gradientUnits="userSpaceOnUse" x1="585.9" y1="540.5" x2="774.1" y2="434.5">
+      <stop offset="0" stop-color="#cbb08a"/>
+      <stop offset="0.36" stop-color="#e7d6b8"/>
+      <stop offset="0.68" stop-color="#dcc7a4"/>
+      <stop offset="1" stop-color="#bc9e77"/>
+    </linearGradient>
+    <linearGradient id="frontR" gradientUnits="userSpaceOnUse" x1="800.9" y1="434.5" x2="989.1" y2="540.5">
+      <stop offset="0" stop-color="#ebdbc0"/>
+      <stop offset="0.32" stop-color="#fbf3e4"/>
+      <stop offset="0.6" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#e4d0af"/>
+    </linearGradient>
+    <linearGradient id="backR" gradientUnits="userSpaceOnUse" x1="1090.9" y1="540.5" x2="1279.1" y2="434.5">
+      <stop offset="0" stop-color="#cbb08a"/>
+      <stop offset="0.36" stop-color="#e7d6b8"/>
+      <stop offset="0.68" stop-color="#dcc7a4"/>
+      <stop offset="1" stop-color="#bc9e77"/>
+    </linearGradient>
+
+    <!-- userSpaceOnUse: the strands are zero-area bounding boxes, so an
+         objectBoundingBox filter region would collapse. -->
+    <filter id="overlap" filterUnits="userSpaceOnUse" x="-200" y="-400" width="2000" height="1800">
+      <feDropShadow dx="-8" dy="12" stdDeviation="16" flood-color="#4a2109" flood-opacity="0.26"/>
+    </filter>
+  </defs>
+
+  <rect width="1568" height="1568" rx="340" fill="url(#canvas)"/>
+
+  <!-- Centred on the canvas at 75%, leaving the margin an app icon needs. -->
+  <g transform="translate(784,784) scale(0.75) translate(-787.5,-487.5)"
+     fill="none" stroke-width="216" stroke-linecap="round">
+    <line x1="535" y1="230" x2="825" y2="745" stroke="url(#backL)"/>
+    <g filter="url(#overlap)">
+      <line x1="535" y1="230" x2="245" y2="745" stroke="url(#frontL)"/>
+    </g>
+    <line x1="1040" y1="230" x2="1330" y2="745" stroke="url(#backR)"/>
+    <g filter="url(#overlap)">
+      <line x1="1040" y1="230" x2="750" y2="745" stroke="url(#frontR)"/>
+    </g>
+  </g>
 </svg>

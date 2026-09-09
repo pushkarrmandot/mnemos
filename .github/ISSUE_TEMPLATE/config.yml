@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/pushkarmandot/mnemos/discussions
+    about: Ask how something works, or float an idea before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/pushkarmandot/mnemos/security/policy
+    about: Report privately — see SECURITY.md. Do not open a public issue.
