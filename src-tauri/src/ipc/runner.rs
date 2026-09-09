@@ -1,12 +1,15 @@
 //! `AgentRunner` — Mnemos' single, pluggable point of contact with LLM
-//! providers (LLD-07). Every LLM turn (chat, memory extraction) flows
+//! providers. Every LLM turn (chat, memory extraction) flows
 //! through this trait; nothing else in the codebase talks to a model.
 //!
-//! **v1 scope (W8):** `ClaudeRunner` only, text-only. No tool-calling loop
-//! (MCP/W16 doesn't exist yet) — a `tool_use` content block the CLI happens
-//! to emit is translated into an inert `AgentEvent::ToolCall` and logged,
-//! never dispatched or awaited for a result. No other vendor adapters
-//! (Codex/OpenCode/Gemini/Ollama are W8b, v1.1).
+//! **v1 scope:** `ClaudeRunner` only, text-only. Project/Everything-scope
+//! chat does pass `--mcp-config` (see `RunnerConfig.mcp`), so the CLI has
+//! real MCP tools available — but the CLI resolves those tool calls
+//! internally; this crate never dispatches one itself. A `tool_use`
+//! content block the CLI emits back over the stream is only translated
+//! into an inert `AgentEvent::ToolCall` and logged, never awaited for a
+//! result on the Rust side. No other vendor adapters
+//! (Codex/OpenCode/Gemini/Ollama) exist yet.
 
 pub mod claude;
 pub mod extraction_handler;
@@ -26,7 +29,7 @@ pub type ApprovalId = String;
 
 pub type AgentStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
-/// Six-method shape, verbatim from HLD §4.4 / LLD-07 §3.1.
+/// Six-method shape.
 #[async_trait::async_trait]
 pub trait AgentRunner: Send + Sync {
     async fn start(&mut self, config: RunnerConfig) -> Result<(), AppError>;
@@ -43,12 +46,26 @@ pub trait AgentRunner: Send + Sync {
 
     async fn set_mode(&mut self, mode: RunnerMode) -> Result<(), AppError>;
 
+    /// This runner's own session id, once it is known — the value a later
+    /// cold spawn passes back as `RunnerConfig.resume`. `None` if the
+    /// runner has not started, or if this vendor has no resumable session
+    /// concept.
+    ///
+    /// **Async on purpose.** For Claude it resolves immediately: the CLI
+    /// accepts a caller-supplied `--session-id`, so the id is known at
+    /// spawn. Other vendors assign their own asynchronously (codex mints a
+    /// thread id in an RPC its `start()` does not await), so a synchronous
+    /// accessor would return `None` for them and silently never persist —
+    /// leaving those chats permanently unresumable. Awaiting here keeps one
+    /// call site correct for both.
+    async fn runner_session_id(&self) -> Option<String>;
+
     async fn dispose(self: Box<Self>) -> Result<(), AppError>;
 }
 
 #[derive(Debug, Clone, Deserialize, Type)]
 pub struct RunnerConfig {
-    /// Wire-level model id, e.g. "claude-sonnet-5" (LLD-07 §4.4).
+    /// Wire-level model id, e.g. "claude-sonnet-5".
     pub model: String,
 
     /// Absolute cap on the entire stream; `None` means "no cap". Chat uses
@@ -58,28 +75,36 @@ pub struct RunnerConfig {
     /// Optional system prompt. If `None`, provider's default is used.
     pub system_prompt: Option<String>,
 
-    /// Tool definitions. Empty in v1 — no MCP bridge exists yet (W16).
-    /// `ClaudeRunner` does not act on this field at all this wave; it exists
-    /// so the trait shape does not have to change when W16/LLD-08 land.
+    /// Tool definitions. Empty in v1 — `ClaudeRunner` does not act on this
+    /// field at all; real MCP tools reach the CLI via `RunnerConfig.mcp`
+    /// instead, resolved by the CLI itself, not through this list.
     pub tools: Vec<ToolDef>,
 
     /// Approval policy for tool calls. Latent in v1 (no tools ship), kept
     /// for the same forward-compat reason as `tools`.
     pub approval_policy: ApprovalPolicy,
 
-    /// MCP server this runner should expose to the CLI (W13a). `None` means
+    /// MCP server this runner should expose to the CLI. `None` means
     /// no `mcp.json` is written and the CLI's built-in tools are disabled
     /// outright (`--tools ""`) — used by extraction and Conversation-scope
     /// chat, where context is stuffed directly into `system_prompt` instead
-    /// of fetched via tool calls (LLD-07 §6.1).
+    /// of fetched via tool calls.
     pub mcp: Option<McpConfig>,
+
+    /// The runner's own session id to resume, from
+    /// `chat_sessions.runner_session_id`. `None` starts a fresh
+    /// conversation; `Some(id)` continues that one, with the vendor
+    /// rehydrating its own context — including prior tool calls and their
+    /// results, which is why Mnemos never replays history itself.
+    /// Extraction always passes `None` (nothing ever resumes it).
+    pub resume: Option<String>,
 }
 
-/// Points a chat runner at the real `mnemos-mcp-server` binary (LLD-08).
+/// Points a chat runner at the real `mnemos-mcp-server` binary.
 /// Scoping (Project vs. Everything) is *not* done here — the CLI's MCP
 /// client has no notion of a scope filter, so the caller instead tells the
 /// model which `project_id` to pass via `RunnerConfig.system_prompt`
-/// (verified against a real `claude` CLI run this wave: the model reliably
+/// (verified against a real `claude` CLI run: the model reliably
 /// passes an instructed `project_id` argument on every scoped tool call).
 #[derive(Debug, Clone, Deserialize, Type)]
 pub struct McpConfig {
@@ -91,12 +116,6 @@ pub struct McpConfig {
 pub struct PromptRequest {
     /// New user content for this turn.
     pub content: Vec<UserContent>,
-
-    /// Prior turns for context. Unused by `ClaudeRunner` — the CLI's
-    /// `--session-id` machinery rehydrates its own context (LLD-07 §5.1).
-    /// Kept on the wire shape so a future vendor adapter without
-    /// server-side session memory can use it.
-    pub history: Vec<TurnRecord>,
 
     /// Optional caller-provided `TurnId`. If `None`, the runner assigns one.
     pub turn_id: Option<TurnId>,
@@ -148,8 +167,10 @@ pub enum RunnerMode {
     Plan,
 }
 
-/// Latent in v1 — no MCP bridge exists yet (W16). Shape kept so LLD-08 can
-/// slot in without changing `RunnerConfig`.
+/// Latent in v1 — `ClaudeRunner` never populates this (real MCP tools flow
+/// through `RunnerConfig.mcp` instead, resolved by the CLI itself). Shape
+/// kept so a Rust-side tool-calling loop can slot in without changing
+/// `RunnerConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ToolDef {
     pub name: String,
@@ -160,7 +181,7 @@ pub struct ToolDef {
     pub timeout_ms: Option<u64>,
 }
 
-/// The stream envelope (LLD-07 §3.3). A discriminated union versioned by
+/// The stream envelope. A discriminated union versioned by
 /// shape, not an integer — consumers `match` and route unrecognized shapes
 /// to `Notice{Info}` for forwards-compat.
 #[derive(Debug, Clone, Serialize, Type)]
@@ -169,10 +190,10 @@ pub enum AgentEvent {
     /// A slice of assistant text. Consumers append verbatim.
     TokenDelta { turn_id: TurnId, text: String },
 
-    /// The model emitted a `tool_use` block. v1 has no tool-calling loop
-    /// (no MCP config is ever passed to the CLI), so this is purely
-    /// informational — logged, never dispatched, no matching `ToolResult`
-    /// will ever follow it this wave.
+    /// The model emitted a `tool_use` block. v1 has no Rust-side
+    /// tool-calling loop — the CLI resolves any MCP tool call itself, so
+    /// this is purely informational — logged, never dispatched, no matching
+    /// `ToolResult` will ever follow it.
     ToolCall {
         turn_id: TurnId,
         call_id: String,
@@ -181,7 +202,7 @@ pub enum AgentEvent {
         human_readable: String,
     },
 
-    /// Latent in v1 — reserved for W16's tool-calling loop.
+    /// Latent in v1 — reserved for a future Rust-side tool-calling loop.
     ToolResult {
         turn_id: TurnId,
         call_id: String,
@@ -200,13 +221,11 @@ pub enum AgentEvent {
         destructive: bool,
     },
 
-    /// Free-form status message. `unknown_x -> Notice{Info}` per SUPERSET.
+    /// Free-form status message. Unrecognized shapes route here as `Info`.
     ///
-    /// Deviation from LLD-07 §3.3's literal sketch: the field is named
-    /// `notice_kind`, not `kind` — the LLD's own sketch names both the
-    /// enum's serde tag (`#[serde(tag = "kind")]`) and this field `kind`,
-    /// which `specta`/`serde` reject as a tag/field name collision. Wire
-    /// shape is otherwise unchanged.
+    /// The field is named `notice_kind`, not `kind` — the enum's own serde
+    /// tag (`#[serde(tag = "kind")]`) already claims `kind`, and
+    /// `specta`/`serde` reject a tag/field name collision.
     Notice {
         turn_id: TurnId,
         notice_kind: NoticeKind,

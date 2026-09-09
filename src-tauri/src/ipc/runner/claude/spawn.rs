@@ -1,11 +1,7 @@
-//! Binary discovery + argv construction for the `claude` CLI subprocess
-//! (LLD-07 §4.2).
+//! Binary discovery + argv construction for the `claude` CLI subprocess.
 //!
-//! Flag names were PROVISIONAL in the LLD; this wave verified the ones this
-//! module uses against a real `claude` 2.1.239 install (`claude --help`
-//! plus several live invocations — see LLD_07_AGENT_RUNNER.md's
-//! "Implementation status" for exactly what was confirmed). Two corrections
-//! versus the LLD's original sketch:
+//! Flag behavior verified against a real `claude` 2.1.239/2.1.240 install
+//! (`claude --help` plus several live invocations). Notable findings:
 //!
 //! - `--verbose` is a **hard requirement** alongside `-p --output-format
 //!   stream-json` (`claude` refuses to start without it: "When using
@@ -16,24 +12,22 @@
 //!   `system.init` frame when no flag is passed, and passing
 //!   `--permission-mode default` explicitly is accepted. `default` is what
 //!   we always pass.
-//!
-//! **W13a addition, verified against a real `claude` 2.1.240 install with a
-//! real `mnemos-mcp-server` child + `--mcp-config`:** none of
-//! `--permission-mode default`, `acceptEdits`, or `dontAsk` let an MCP tool
-//! call through without an interactive approval prompt — every one of them
-//! produced a `permission_denied` system frame and a denied `tool_result`
-//! on a first-party MCP server with `readOnlyHint: true` tools. The
-//! mechanism that actually works is `--allowedTools "mcp__<server-name>"`
-//! (pre-approves every tool namespaced under that MCP server by name,
-//! independent of `--permission-mode`), combined with `--tools ""` (empties
-//! the CLI's *built-in* tool set — Bash/Read/Write/WebSearch — so the model
-//! has no tool surface except the MCP tools we explicitly allow; verified
-//! it still refuses a same-turn "also run `whoami`" instruction). This is
-//! why v1 needs no approval-flow UI: every v1 MCP tool is read-only
-//! (LLD-08 §3), so pre-approving the whole `mnemos` server at spawn time is
-//! safe and `--permission-mode` never has to move off the safe `default`
-//! LLD-07 §6.3 already warns never to leave (`bypassPermissions` is never
-//! passed, chat or extraction).
+//! - Verified against a real `claude` 2.1.240 install with a
+//!   real `mnemos-mcp-server` child + `--mcp-config`: none of
+//!   `--permission-mode default`, `acceptEdits`, or `dontAsk` let an MCP tool
+//!   call through without an interactive approval prompt — every one of them
+//!   produced a `permission_denied` system frame and a denied `tool_result`
+//!   on a first-party MCP server with `readOnlyHint: true` tools. The
+//!   mechanism that actually works is `--allowedTools "mcp__<server-name>"`
+//!   (pre-approves every tool namespaced under that MCP server by name,
+//!   independent of `--permission-mode`), combined with `--tools ""` (empties
+//!   the CLI's *built-in* tool set — Bash/Read/Write/WebSearch — so the model
+//!   has no tool surface except the MCP tools we explicitly allow; verified
+//!   it still refuses a same-turn "also run `whoami`" instruction). This is
+//!   why v1 needs no approval-flow UI: every v1 MCP tool is read-only,
+//!   so pre-approving the whole `mnemos` server at spawn time is
+//!   safe and `--permission-mode` never has to move off the safe `default`
+//!   (`bypassPermissions` is never passed, chat or extraction).
 
 use std::path::PathBuf;
 
@@ -41,14 +35,14 @@ use crate::error::AppError;
 use crate::ipc::runner::mcp_shared::MCP_SERVER_NAME;
 
 /// Manual PATH scan — one binary lookup does not justify the `which` crate
-/// dependency. `configured_path` is the (not-yet-built) Settings override
-/// from LLD-07 §10 OQ3; `None` in v1 since no such Settings surface exists.
+/// dependency. `configured_path` is the (not-yet-built) Settings override;
+/// `None` in v1 since no such Settings surface exists.
 ///
-/// Windows parity audit finding #18: extension candidates are now
+/// Windows parity audit finding #18: extension candidates are
 /// `PATHEXT`-aware (standard Windows executable-search semantics) instead
-/// of the fixed `.exe`/`.cmd` list — a `.ps1`/`.bat`/other shimmed `claude`
+/// of a fixed `.exe`/`.cmd` list, so a `.ps1`/`.bat`/other shimmed `claude`
 /// install (e.g. from a package manager whose shim isn't one of those two)
-/// was previously missed outright.
+/// is found too.
 ///
 /// **Unresolved risk, not fixed here (finding #18):** if the resolved
 /// binary is a `.cmd` shim, spawning it via `std::process::Command` goes
@@ -57,8 +51,7 @@ use crate::ipc::runner::mcp_shared::MCP_SERVER_NAME;
 /// escape. `build_argv` below can pass a full multi-line `--system-prompt`
 /// argument, which is exactly the shape that can trip this. No workaround
 /// is attempted: manually re-implementing cmd.exe quoting is a known
-/// injection-bug source and explicitly out of scope for this fix (see this
-/// wave's brief). This module's argv surface has no `--system-prompt-file`/
+/// injection-bug source and explicitly out of scope. This module's argv surface has no `--system-prompt-file`/
 /// stdin alternative today — `build_argv` always passes `--system-prompt`
 /// as a literal argument when `opts.system_prompt` is `Some` — so if this
 /// is ever hit in practice, verify against a real `claude.cmd` on real
@@ -133,7 +126,15 @@ pub struct ArgvOptions<'a> {
     pub model: &'a str,
     pub permission_mode: &'a str,
     pub system_prompt: Option<&'a str>,
+    /// Either a fresh uuid to *name* a new conversation, or the id of an
+    /// existing one to *resume* — `resuming` picks which.
     pub session_id: &'a str,
+    /// `--resume <id>` instead of `--session-id <id>`. These are different
+    /// flags with different jobs: `--session-id` names a conversation,
+    /// `--resume` loads one. Verified against a real CLI — passing
+    /// `--session-id` with a previously-used id does *not* rehydrate
+    /// anything, which is the bug this flag exists to fix.
+    pub resuming: bool,
     /// `Some(path)` writes `--mcp-config <path> --strict-mcp-config
     /// --allowedTools "mcp__mnemos"` (Project/Everything-scope chat).
     /// `None` means no MCP config for this run (extraction,
@@ -148,10 +149,10 @@ pub struct ArgvOptions<'a> {
 /// Builds the argv (excluding argv[0]).
 ///
 /// Shape is identical whether the resulting runner is used as a long-lived
-/// chat session or an ephemeral extraction call (LLD-07 §5's two lifecycle
-/// patterns): `--session-id` is always generated and passed. It's a no-op
+/// chat session or an ephemeral extraction call: `--session-id` is always
+/// generated and passed. It's a no-op
 /// for extraction (nothing ever resumes it) and is what lets a chat runner
-/// be resumed by a fresh spawn after a crash (LLD-07 §5.1).
+/// be resumed by a fresh spawn after a crash.
 pub fn build_argv(opts: &ArgvOptions<'_>) -> Vec<String> {
     let mut argv = vec![
         "-p".to_string(),
@@ -164,7 +165,11 @@ pub fn build_argv(opts: &ArgvOptions<'_>) -> Vec<String> {
         opts.model.to_string(),
         "--permission-mode".to_string(),
         opts.permission_mode.to_string(),
-        "--session-id".to_string(),
+        if opts.resuming {
+            "--resume".to_string()
+        } else {
+            "--session-id".to_string()
+        },
         opts.session_id.to_string(),
     ];
     if let Some(sp) = opts.system_prompt {
@@ -173,7 +178,7 @@ pub fn build_argv(opts: &ArgvOptions<'_>) -> Vec<String> {
     }
     // Never give the model the CLI's built-in tools — only the `mnemos` MCP
     // surface, and only when `mcp_config_path` is set (see this module's
-    // "W13a addition" doc comment for why this needs no approval-flow UI).
+    // doc comment for why this needs no approval-flow UI).
     argv.push("--tools".to_string());
     argv.push(String::new());
     if let Some(mcp_config_path) = opts.mcp_config_path {
@@ -190,6 +195,42 @@ pub fn build_argv(opts: &ArgvOptions<'_>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The resume branch is the whole point of storing
+    /// `chat_sessions.runner_session_id`: `--session-id` *names* a
+    /// conversation, `--resume` *loads* one. Getting this backwards means
+    /// the model silently forgets everything across an app restart while
+    /// the UI still shows the full transcript, so it is asserted
+    /// explicitly — including that nothing else about the argv changes,
+    /// since a resumed turn must still get the same model, tools and MCP
+    /// surface as a fresh one.
+    #[test]
+    fn resuming_swaps_session_id_for_resume_and_changes_nothing_else() {
+        let opts = |resuming| ArgvOptions {
+            model: "claude-sonnet-5",
+            permission_mode: "default",
+            system_prompt: Some("sp"),
+            session_id: "abc-123",
+            resuming,
+            mcp_config_path: Some("/tmp/mcp.json"),
+        };
+        let fresh = build_argv(&opts(false));
+        let resumed = build_argv(&opts(true));
+
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "abc-123"]));
+        assert!(!fresh.iter().any(|a| a == "--resume"));
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "abc-123"]));
+        assert!(!resumed.iter().any(|a| a == "--session-id"));
+
+        // Same length, and identical everywhere except the one flag name.
+        assert_eq!(fresh.len(), resumed.len());
+        let diffs: Vec<_> = fresh
+            .iter()
+            .zip(resumed.iter())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(diffs.len(), 1, "only the flag name may differ: {diffs:?}");
+    }
+
     #[test]
     fn argv_includes_the_hard_requirements() {
         let argv = build_argv(&ArgvOptions {
@@ -197,6 +238,7 @@ mod tests {
             permission_mode: "default",
             system_prompt: None,
             session_id: "abc-123",
+            resuming: false,
             mcp_config_path: None,
         });
         // `--verbose` is required alongside `-p --output-format
@@ -231,6 +273,7 @@ mod tests {
             permission_mode: "default",
             system_prompt: Some("You output ONLY JSON."),
             session_id: "abc-123",
+            resuming: false,
             mcp_config_path: None,
         });
         assert!(argv
@@ -245,6 +288,7 @@ mod tests {
             permission_mode: "default",
             system_prompt: None,
             session_id: "abc-123",
+            resuming: false,
             mcp_config_path: Some("/tmp/mcp.json"),
         });
         assert!(argv

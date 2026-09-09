@@ -1,4 +1,4 @@
-//! Integration tests for LLD-05 (W11) — `memory::extract_conversation` /
+//! Integration tests for `memory::extract_conversation` /
 //! `memory::refresh_project` against the **real** `python -m mnemos_worker`
 //! process (same convention as `tests/worker_supervisor_integration.rs`),
 //! with a scripted fake registered for `run_agent_extraction` (swapped out
@@ -6,7 +6,7 @@
 //! process) so the suite never needs the real `claude` CLI on PATH — the
 //! Python job handlers (schema validation, retry policy, diff guardrail)
 //! are exercised for real; only the agent turn itself is canned, matching
-//! LLD-05 §9.2's "FakeHarnessAdapter... exercises the full flow" strategy,
+//! the "FakeHarnessAdapter... exercises the full flow" strategy,
 //! just realized as a fake reverse-RPC handler at the process boundary
 //! instead of a fake `HarnessAdapter`.
 //!
@@ -50,7 +50,7 @@ fn fast_config(state_dir: PathBuf) -> SupervisorConfig {
     cfg
 }
 
-/// Scripted `run_agent_extraction` fake (LLD-05 §9.2's FakeHarnessAdapter,
+/// Scripted `run_agent_extraction` fake (the FakeHarnessAdapter approach,
 /// realized as a reverse-RPC handler). Each call pops the next canned
 /// response and records the params it was invoked with, so a test can
 /// assert on what the worker's prompt actually contained.
@@ -84,9 +84,9 @@ impl ReverseRpcHandler for ScriptedAgent {
     }
 }
 
-/// `spawn()` "always returns `Ok`" (LLD-02's own "Implementation status"),
-/// but a failed first connection attempt just schedules a background
-/// reconnect on its own backoff (LLD-02 §5.4) rather than blocking `spawn()`
+/// `spawn()` always returns `Ok`, but a failed first connection attempt
+/// just schedules a background
+/// reconnect on its own backoff rather than blocking `spawn()`
 /// until it succeeds — so a caller that needs the worker up before
 /// proceeding (every test here) has to wait for that reconnect itself, the
 /// same way `tests/worker_supervisor_integration.rs` does.
@@ -139,6 +139,7 @@ fn seed_transcript(conv_id: &str) {
 
 fn canned_extraction(action_item_text: &str) -> Value {
     json!({
+        "title": "Auth Spec Handoff",
         "summary_markdown": "# Overview\nShipping the auth spec.",
         "action_items": [{"text": action_item_text, "assignee_hint": "David", "due_hint": "today", "source_timestamp_ms": 0}],
         "decisions": [{"statement": "OAuth for v1", "decided_by_hint": "David", "quote": null, "source_timestamp_ms": 0}],
@@ -236,8 +237,8 @@ async fn memory_system_end_to_end() {
     // action item" flow would).
     for text in ["Manual item A", "Manual item B"] {
         sqlx::query(
-            "INSERT INTO action_items (id, conv_id, text, done, dismissed, added_manually, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, 0, 0, 1, 0, 0)",
+            "INSERT INTO action_items (id, conv_id, text, done, added_manually, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, 1, 0, 0)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&conv.id)

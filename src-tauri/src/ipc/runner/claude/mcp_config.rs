@@ -1,6 +1,6 @@
 //! Writes/removes the per-session `mcp.json` a chat `ClaudeRunner` points
-//! `--mcp-config` at (LLD-07 §6.1, W13a). Only Project/Everything-scope
-//! chat runners ever call this — extraction and Conversation-scope chat
+//! `--mcp-config` at. Only Project/Everything-scope chat runners ever call
+//! this — extraction and Conversation-scope chat
 //! pass `RunnerConfig.mcp = None` and never write one.
 //!
 //! Takes `config_path`/`data_dir` as explicit arguments rather than
@@ -17,10 +17,10 @@ use crate::error::AppError;
 
 use crate::ipc::runner::mcp_shared::MCP_SERVER_NAME;
 
-/// Writes `config_path` (LLD-07 §6.1's shape) pointing `--mcp-config` at the
-/// real `mnemos-mcp-server` binary. No scope args on the command line — see
+/// Writes `config_path` pointing `--mcp-config` at the real
+/// `mnemos-mcp-server` binary. No scope args on the command line — see
 /// `runner::McpConfig`'s doc comment for why scoping happens via the system
-/// prompt instead of a startup flag (LLD-08's actual binary never grew a
+/// prompt instead of a startup flag (the actual binary never grew a
 /// `--scope-project`/`--scope-conversation` flag; tools take `project_id` as
 /// a per-call argument instead).
 pub fn write(config_path: &Path, server_binary: &str, data_dir: &Path) -> Result<(), AppError> {

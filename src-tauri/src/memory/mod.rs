@@ -1,22 +1,17 @@
-//! Wave 11 — LLD-05 orchestration for the two memory pipelines: (A)
+//! Orchestration for the two memory pipelines: (A)
 //! per-conversation extraction and (B) project-memory refresh.
 //!
 //! Both entry points are plain async functions over `&dyn StorageService` +
-//! `&WorkerSupervisor`, not `#[tauri::command]`s — this wave's brief is
-//! explicit that the UI (Conversation Detail / Project Detail) is later
-//! waves' job, and there is no `process_conversation` step orchestrator yet
-//! for a `conversation_retry_step`/`project_refresh_memory` command to hook
-//! into (see LLD-02's "Implementation status"). Callers today are tests /a
-//! future orchestrator; see LLD-05's "Implementation status" for what's
-//! deferred.
+//! `&WorkerSupervisor`, not `#[tauri::command]`s — the command-layer wrappers
+//! that call into them live in `commands::conversation`/`commands::recording`
+//! (extraction) and `commands::project` (refresh).
 //!
 //! The agent turn itself — including the JSON-schema validation and the
-//! one-retry-then-fail policy (LLD-05 §4.5) — happens inside the Python
+//! one-retry-then-fail policy — happens inside the Python
 //! worker's job handler, which is the one that actually calls
-//! `run_agent_extraction` (LLD-07 §7.2). What comes back over the forward
+//! `run_agent_extraction`. What comes back over the forward
 //! `extract_memory`/`refresh_project_memory` RPC is already validated; this
-//! module's only job is the storage-write orchestration LLD-05 §4.4/§5.5
-//! specify.
+//! module's only job is the storage-write orchestration around it.
 
 use std::path::Path;
 
@@ -32,11 +27,19 @@ use crate::ipc::python::{
     ExtractMemory, ExtractMemoryResponse, RefreshProjectMemory, WorkerSupervisor,
 };
 
+/// The title a conversation row is created with (`recording.rs::start_recording`)
+/// before extraction ever runs. Doubles as the "hasn't been titled yet" sentinel
+/// `extract_conversation` checks below — a conversation still carrying this
+/// exact string is fair game for the auto-generated title; anything else,
+/// whether a manual rename or a prior auto-title, is left alone.
+pub const DEFAULT_CONVERSATION_TITLE: &str = "Untitled Conversation";
+
 impl From<crate::ipc::python::ExtractedActionItem> for NewActionItem {
     fn from(a: crate::ipc::python::ExtractedActionItem) -> Self {
         NewActionItem {
             text: a.text,
             assignee_hint: a.assignee_hint,
+            assignee_is_self: a.assignee_is_self,
             due_hint: a.due_hint,
             source_ts: a.source_timestamp_ms,
         }
@@ -49,6 +52,7 @@ impl From<crate::ipc::python::ExtractedDecision> for NewDecision {
             statement: d.statement,
             quote: d.quote,
             decided_by_hint: d.decided_by_hint,
+            decided_by_is_self: d.decided_by_is_self,
             source_ts: d.source_timestamp_ms,
         }
     }
@@ -59,6 +63,7 @@ impl From<crate::ipc::python::ExtractedOpenQuestion> for NewOpenQuestion {
         NewOpenQuestion {
             question: q.question,
             raised_by_hint: q.raised_by_hint,
+            raised_by_is_self: q.raised_by_is_self,
             source_ts: q.source_timestamp_ms,
         }
     }
@@ -128,7 +133,7 @@ fn read_json_or_none(path: &Path) -> Result<Option<Value>, AppError> {
     Ok(Some(read_json(path)?))
 }
 
-/// LLD-05 §8 "user has manually edited summary.md": `summary.md`'s mtime
+/// "User has manually edited summary.md": `summary.md`'s mtime
 /// newer than `extraction.json`'s means the user's edit hasn't been
 /// re-extracted over yet. No `extraction.json` yet (first run) or no
 /// `summary.md` yet both mean "not user-edited" — write freely.
@@ -190,9 +195,9 @@ async fn self_contact(storage: &dyn StorageService) -> Result<Vec<Value>, AppErr
     })])
 }
 
-/// Runs one conversation's extraction turn end-to-end (LLD-05 §4): reads
+/// Runs one conversation's extraction turn end-to-end: reads
 /// `transcript.json`, asks the worker for a validated extraction payload,
-/// then persists per §4.4's write ordering — `write_extraction ->
+/// then persists in this write order — `write_extraction ->
 /// write_summary -> replace_extraction_rows -> set_pipeline_step` (files
 /// first, single SQLite commit last).
 pub async fn extract_conversation(
@@ -214,20 +219,34 @@ pub async fn extract_conversation(
             conversation_id: conv_id.to_string(),
             transcript,
             // v1 has no contacts table, but it does know one person: the
-            // user. See `self_contact` — this was `vec![]` until W18.
+            // user. See `self_contact`.
             contacts: self_contact(storage).await?,
             notes: None,
             conversation_meta,
         })
         .await?;
 
-    // extraction.json preserves the LLD-05 §4.3 wire shape verbatim (hint
+    // extraction.json preserves the wire shape verbatim (hint
     // field names, not the internal `action_items`/`decisions` column
-    // names) since it's a standalone artifact later waves (Conversation
-    // Detail, W12) read directly.
+    // names) since it's a standalone artifact Conversation Detail reads
+    // directly.
     let extraction_json = serde_json::to_value(&resp)
         .map_err(|e| AppError::storage(format!("serialise extraction.json: {e}")))?;
     storage.write_extraction(conv_id, &extraction_json).await?;
+
+    // Only claim the title while it's still the placeholder a recording
+    // starts with — a title already changed (by the user, or by an earlier
+    // extraction pass) is left alone, the same "don't clobber" stance
+    // `summary_is_user_edited` takes for the summary below. `force_overwrite`
+    // doesn't reach this: it exists for the summary's file-mtime heuristic,
+    // which can go stale; the title has no such heuristic to go stale.
+    let title = resp.title.trim();
+    if !title.is_empty() {
+        let conversation = storage.get_conversation(conv_id).await?;
+        if conversation.title == DEFAULT_CONVERSATION_TITLE {
+            storage.update_conversation_title(conv_id, title).await?;
+        }
+    }
 
     let user_edited = !force_overwrite && summary_is_user_edited(conv_id)?;
     let summary_written = if user_edited {
@@ -291,14 +310,13 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// `YYYY-MM-DDTHH-MM-SS-mmmZ` (dashes, not colons — filesystem-safe) for
-/// `project_memory_history/` snapshot filenames (LLD-05 §5.5 — extended
-/// with a millisecond field beyond the LLD's `<UTC-YYYY-MM-DDTHH-MM-SSZ>`
-/// sketch: two refreshes for the same project landing in the same wall-
-/// clock second — easy to hit in a fast test, and not impossible from a
+/// `project_memory_history/` snapshot filenames. Includes a millisecond
+/// field because two refreshes for the same project landing in the same
+/// wall-clock second — easy to hit in a fast test, and not impossible from a
 /// manual refresh racing an auto-refresh in production — would otherwise
 /// silently collide on the same filename and one snapshot would clobber the
 /// other. Lexical sort, which `prune_history` relies on, still equals
-/// chronological order with the extra field).
+/// chronological order with the extra field.
 fn iso_utc_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -312,11 +330,11 @@ fn iso_utc_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}-{mi:02}-{s:02}-{millis:03}Z")
 }
 
-/// Runs one project's memory refresh (LLD-05 §5): assembles the current
+/// Runs one project's memory refresh: assembles the current
 /// document + the newly-added conversations' extractions, asks the worker
 /// for an updated document (the worker owns the modify-not-rewrite prompt
-/// contract §5.4 and computes the diff-guardrail ratio itself), then
-/// snapshots the prior document *before* overwriting it (§5.5) and prunes
+/// contract and computes the diff-guardrail ratio itself), then
+/// snapshots the prior document *before* overwriting it and prunes
 /// the history directory to the newest 10.
 pub async fn refresh_project(
     storage: &dyn StorageService,
@@ -384,9 +402,8 @@ pub async fn refresh_project(
     })
 }
 
-/// W12a — LLD-05 §5.1's auto-refresh trigger policy, deferred whole by W11
-/// ("no `process_conversation` orchestrator yet to hook into"). Settings key
-/// `project_memory.pending_count.<project_id>` per the LLD's naming — stored
+/// The auto-refresh trigger policy's settings key,
+/// `project_memory.pending_count.<project_id>` — stored
 /// as the array of pending conversation ids (not a bare int) so the same
 /// read also hands back `since_conversation_ids` for the refresh call.
 fn pending_count_key(project_id: &str) -> String {
@@ -395,13 +412,13 @@ fn pending_count_key(project_id: &str) -> String {
 
 const REFRESH_EVERY_N_SETTING: &str = "memory.refresh_every_n_conversations";
 
-/// W18: was `1`, i.e. re-synthesize the whole project document after every
-/// single conversation. That is one LLM call per recording, forever, to
-/// rewrite two paragraphs that usually do not change — and it made "there are
-/// conversations pending" a state the user should never see, because it
-/// lasted seconds. Batching three makes a non-empty pending list *normal*,
-/// which is why the UI's staleness banner keys off a failed refresh rather
-/// than off a non-empty list.
+/// Re-synthesizing the whole project document after every single
+/// conversation would be one LLM call per recording, forever, to
+/// rewrite two paragraphs that usually do not change — and it would make
+/// "there are conversations pending" a state the user should never see,
+/// because it lasted seconds. Batching three makes a non-empty pending list
+/// *normal*, which is why the UI's staleness banner keys off a failed
+/// refresh rather than off a non-empty list.
 const DEFAULT_REFRESH_EVERY_N: i64 = 3;
 
 /// A pending list this long means refreshes have been failing for a while.
@@ -464,9 +481,10 @@ pub async fn clear_pending(storage: &dyn StorageService, project_id: &str) -> Re
         .await
 }
 
-/// W19: the batch threshold is deliberately bypassed for the *first*
-/// document. Batching (W18, N=3) exists to avoid a full re-synthesis per
-/// recording just to rewrite paragraphs that usually barely move — but that
+/// The batch threshold is deliberately bypassed for the *first*
+/// document. Batching (N=3, see `DEFAULT_REFRESH_EVERY_N`) exists to avoid
+/// a full re-synthesis per recording just to rewrite paragraphs that
+/// usually barely move — but that
 /// trade-off assumes there is already a document worth preserving. With no
 /// memory at all the alternative isn't "slightly stale", it's "completely
 /// empty", and a project that shows nothing until its third conversation
@@ -493,7 +511,7 @@ pub async fn refresh_threshold(storage: &dyn StorageService) -> Result<usize, Ap
         .max(1) as usize)
 }
 
-/// `hex(sha256(sorted(conv_id).join("\n")))` (LLD-05 §5.6).
+/// `hex(sha256(sorted(conv_id).join("\n")))`.
 pub fn batch_signature(conversation_ids: &[String]) -> String {
     use sha2::{Digest, Sha256};
     let mut sorted = conversation_ids.to_vec();
@@ -507,10 +525,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Called after a conversation's extraction commits (LLD-05 §5.1 "Auto-
-/// refresh happens after a conversation reaches pipeline `done`"). Appends
+/// Called after a conversation's extraction commits, since auto-refresh
+/// happens after a conversation reaches pipeline `done`. Appends
 /// `conv_id` to the project's pending list, and — once the list reaches
-/// `memory.refresh_every_n_conversations` (setting; default 1) — runs the
+/// `memory.refresh_every_n_conversations` (setting; default 3) — runs the
 /// refresh immediately and clears the list. On a refresh failure the pending
 /// list is left intact (not cleared) so the next trigger — auto or manual —
 /// retries with the same batch instead of losing it.
@@ -605,7 +623,7 @@ mod tests {
 
     #[test]
     fn an_existing_document_still_waits_for_the_full_batch() {
-        // W18's actual purpose — don't re-synthesize per recording.
+        // Batching's actual purpose — don't re-synthesize per recording.
         assert!(!should_refresh_now(true, 1, 3));
         assert!(!should_refresh_now(true, 2, 3));
         assert!(should_refresh_now(true, 3, 3));

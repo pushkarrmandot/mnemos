@@ -4,7 +4,7 @@
 //! *not* purely one-JSON-object-per-line: an invalid-model run emitted a
 //! bracketed diagnostic line (`[claude-code:unrecognized_model] {...}`)
 //! ahead of the JSON frames. `RawLine::Malformed` exists precisely so that
-//! kind of line degrades gracefully (LLD-07 §8-4) instead of desyncing the
+//! kind of line degrades gracefully instead of desyncing the
 //! parser — framing recovers line-by-line since we never cross a line
 //! boundary.
 
@@ -15,7 +15,7 @@ use tokio::process::ChildStdout;
 pub enum RawLine {
     Frame(Value),
     /// A line that isn't valid JSON. Counted toward the 3-consecutive cap
-    /// (LLD-07 §8-4) by the caller.
+    /// by the caller.
     Malformed,
 }
 

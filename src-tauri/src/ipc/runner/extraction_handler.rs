@@ -1,11 +1,11 @@
-//! `run_agent_extraction` reverse-RPC handler (LLD-02 §7.2, LLD-07 §5.2/§7).
+//! `run_agent_extraction` reverse-RPC handler.
 //!
 //! The Python worker calls back into Rust to run one extraction turn; this
 //! handler spawns a fresh, ephemeral `ClaudeRunner`, drains it to
 //! `Complete`, parses the buffered text as JSON, and returns it. Registered
-//! by `lib.rs` via `WorkerSupervisor::register_reverse_rpc` — this is the
-//! first *real* handler attached to the generic dispatch mechanism W5
-//! built (W5 only registered dummy handlers in tests).
+//! by `lib.rs` via `WorkerSupervisor::register_reverse_rpc` — the only
+//! real handler attached to the generic dispatch mechanism; tests register
+//! their own dummy handlers instead.
 
 use std::sync::Arc;
 
@@ -22,9 +22,9 @@ use crate::ipc::runner::{
 };
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-/// LLD-02 §7.2 / §12 open question: at most 2 concurrent
+/// At most 2 concurrent
 /// `run_agent_extraction` dispatches. Two concurrent `claude` subprocesses
-/// is well within resource budget (LLD-07 §5.2).
+/// is well within resource budget.
 const MAX_CONCURRENT_EXTRACTIONS: usize = 2;
 
 #[derive(Debug, Deserialize)]
@@ -33,9 +33,10 @@ struct RunAgentExtractionParams {
     system_prompt: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
-    /// v1 extraction is always stateless — LLD-07 §7.1 documents this
-    /// param as "v1 always null". Accepted-but-ignored so the wire shape
-    /// matches the LLD without this handler pretending to resume anything.
+    /// v1 extraction is always stateless — this
+    /// param is always null on the wire. Accepted-but-ignored so the wire
+    /// shape stays stable without this handler pretending to resume
+    /// anything.
     #[allow(dead_code)]
     #[serde(default)]
     session_id: Option<String>,
@@ -97,9 +98,11 @@ async fn run_extraction(
             model: MODEL_IDS.extraction.to_string(),
             timeout_ms: Some(timeout_ms),
             system_prompt: Some(system_prompt),
-            tools: vec![], // extraction has no tools in v1 (LLD-07 §5.2).
+            tools: vec![], // extraction has no tools in v1.
             approval_policy: ApprovalPolicy::AutoDenyDestructive,
-            mcp: None, // extraction is self-contained — no MCP config (W13a).
+            mcp: None, // extraction is self-contained — no MCP config.
+            // Ephemeral: nothing ever resumes an extraction call.
+            resume: None,
         })
         .await
     {
@@ -110,7 +113,6 @@ async fn run_extraction(
     let mut stream = match runner
         .prompt(PromptRequest {
             content: vec![UserContent::Text(prompt)],
-            history: vec![],
             turn_id: None,
         })
         .await
@@ -165,7 +167,8 @@ fn strip_code_fence(text: &str) -> &str {
     }
 }
 
-/// LLD-07 §7.2's failure-code table.
+/// Maps an `AppError` from the extraction turn into the RPC error code +
+/// `kind` the Python worker's `agent_call.py` dispatches on.
 fn to_rpc_err(err: AppError) -> ReverseRpcError {
     match &err {
         AppError::WorkerUnavailable { .. } => ReverseRpcError {
@@ -242,8 +245,8 @@ fn to_rpc_err(err: AppError) -> ReverseRpcError {
 mod tests {
     use super::*;
 
-    /// Opt-in end-to-end proof against the REAL `claude` CLI (LLD-07 §9's
-    /// "live-call opt-in test" pattern) — not run in CI, and not part of
+    /// Opt-in end-to-end proof against the REAL `claude` CLI —
+    /// not run in CI, and not part of
     /// the regular `cargo test` run. Requires `claude` on `PATH` and an
     /// active login. Run with:
     /// `MNEMOS_LIVE_CLAUDE=1 cargo test --offline -- --ignored run_extraction_against_the_real_claude_cli`

@@ -1,7 +1,7 @@
 //! `ClaudeRunner` — the v1 `AgentRunner` implementation: a subprocess
-//! supervisor around the `claude` CLI (LLD-07 §4).
+//! supervisor around the `claude` CLI.
 //!
-//! Both of LLD-07 §5's lifecycle shapes are the *same* runner code: `start`
+//! Both chat and extraction share the *same* runner code: `start`
 //! always spawns a fresh `claude` process with a freshly generated
 //! `--session-id`, and `prompt` writes one stream-json user turn to its
 //! stdin per call. A chat caller holds one `ClaudeRunner` across many
@@ -10,19 +10,14 @@
 //! (ephemeral). Nothing in this file needs to know which pattern its
 //! caller is using.
 //!
-//! **Major correction versus LLD-07 §4.2's original sketch, found by
-//! testing against a real `claude` 2.1.239 install this wave:** `start()`
-//! does *not* block on a handshake frame. Under `--input-format
+//! `start()` does *not* block on a handshake frame. Under `--input-format
 //! stream-json`, `claude` prints absolutely nothing — not even
 //! `system/init` — until it has received the first stream-json
-//! user-message line on stdin. The LLD assumed the init frame was an
-//! independent pre-turn handshake; live testing showed it arrives bundled
-//! with (immediately before) the *first turn's* response. Blocking
-//! `start()` on a frame that only ever arrives after the first `prompt()`
-//! write is a deadlock, not a slow start — confirmed by hand with a named
-//! pipe (write withheld for several seconds -> zero bytes of output the
-//! whole time; write one line -> `init` + the full turn arrive together
-//! moments later). `start()` therefore only spawns the process and wires
+//! user-message line on stdin; the init frame arrives bundled with
+//! (immediately before) the *first turn's* response, not as an independent
+//! pre-turn handshake. Blocking `start()` on a frame that only ever arrives
+//! after the first `prompt()` write would be a deadlock, not a slow start.
+//! `start()` therefore only spawns the process and wires
 //! up the reader/stderr tasks; `system/init` is swallowed like any other
 //! frame during the first turn's drain, and a genuinely broken CLI (bad
 //! binary, immediate crash, not logged in) surfaces through the ordinary
@@ -49,7 +44,7 @@ use crate::ipc::runner::{
 };
 use stream::{FrameReader, RawLine};
 
-/// Pinned model ids (LLD-07 §4.4). `claude-fable-5` is a Settings-only
+/// Pinned model ids. `claude-fable-5` is a Settings-only
 /// alternate — not wired in v1 (no Settings surface exists yet).
 pub const MODEL_IDS: ModelIds = ModelIds {
     chat_default: "claude-haiku-4-5-20251001",
@@ -58,10 +53,8 @@ pub const MODEL_IDS: ModelIds = ModelIds {
     // JSON parse (`extraction_handler.rs`) requires the model's entire
     // response to be pure JSON, and small models are meaningfully less
     // reliable at obeying "no prose, no code fences" than Sonnet, even with
-    // the schema-retry nudge. LLD-07 §10's original design table already
-    // flagged this: "Extraction ... claude-sonnet-5 ... No in v1 —
-    // extraction quality is load-bearing." Chat has no such structured-output
-    // requirement, so it stays on Haiku.
+    // the schema-retry nudge: extraction quality is load-bearing.
+    // Chat has no such structured-output requirement, so it stays on Haiku.
     extraction: "claude-sonnet-5",
 };
 
@@ -88,15 +81,13 @@ pub struct ClaudeRunner {
     current_turn: Option<TurnId>,
     pending_cancel: Option<oneshot::Sender<()>>,
     /// Set only when `RunnerConfig.mcp` was `Some` at `start()` — the
-    /// written `mcp.json`'s path, deleted on `dispose()` (LLD-07 §6.1).
+    /// written `mcp.json`'s path, deleted on `dispose()`.
     mcp_config_path: Option<std::path::PathBuf>,
-    /// `set_mode` is latent in v1 (LLD-07 §4.6's tool-driven mapping has no
-    /// tools to react to yet — no MCP config ever ships this wave). The CLI
-    /// only accepts `--permission-mode` at spawn time anyway, so there is
-    /// nothing a live-process mode change could do; this just records the
-    /// call for whichever later wave adds a respawn-on-mode-change path.
-    #[allow(dead_code)]
-    pending_mode: Option<RunnerMode>,
+    /// The CLI session this process is attached to: either the fresh uuid
+    /// passed to `--session-id`, or the id handed to `--resume`. Persisted
+    /// by the caller so a later cold spawn can resume this same
+    /// conversation.
+    runner_session_id: Option<String>,
 }
 
 impl Default for ClaudeRunner {
@@ -116,7 +107,7 @@ impl ClaudeRunner {
             current_turn: None,
             pending_cancel: None,
             mcp_config_path: None,
-            pending_mode: None,
+            runner_session_id: None,
         }
     }
 
@@ -161,6 +152,9 @@ impl AgentRunner for BoundClaudeRunner {
     }
     async fn set_mode(&mut self, mode: RunnerMode) -> Result<(), AppError> {
         self.runner.set_mode(mode).await
+    }
+    async fn runner_session_id(&self) -> Option<String> {
+        self.runner.runner_session_id().await
     }
     async fn dispose(self: Box<Self>) -> Result<(), AppError> {
         Box::new(self.runner).dispose().await
@@ -256,7 +250,7 @@ impl AgentRunner for ClaudeRunner {
 
     async fn cancel_turn(&mut self, turn_id: TurnId) -> Result<(), AppError> {
         if self.current_turn.as_ref() != Some(&turn_id) {
-            return Ok(()); // stale/idempotent cancel (LLD-07 §5.3 step 1).
+            return Ok(()); // stale/idempotent cancel.
         }
         // Unparks anything awaiting `respond_to_approval` (none exist in
         // v1, but the drain semantics are correct either way).
@@ -286,14 +280,23 @@ impl AgentRunner for ClaudeRunner {
     ) -> Result<(), AppError> {
         // Latent in v1 — no tools ship, so the CLI never emits a
         // permission-request frame and `ApprovalRequest` is never produced.
-        // Idempotent no-op per LLD-07 §5.3's "late response after cancel"
+        // Idempotent no-op: the "late response after cancel"
         // rule generalizes cleanly to "no response is ever pending".
         Ok(())
     }
 
-    async fn set_mode(&mut self, mode: RunnerMode) -> Result<(), AppError> {
-        self.pending_mode = Some(mode);
+    async fn set_mode(&mut self, _mode: RunnerMode) -> Result<(), AppError> {
+        // Latent in v1: the CLI only accepts `--permission-mode` at spawn
+        // time, so a live-process mode change has nothing to do yet.
         Ok(())
+    }
+
+    /// Resolves immediately — the CLI accepts a caller-supplied
+    /// `--session-id`, so this is the id we passed at spawn (or the one we
+    /// resumed). The trait method is async for vendors that assign their
+    /// own id asynchronously; see `AgentRunner::runner_session_id`.
+    async fn runner_session_id(&self) -> Option<String> {
+        self.runner_session_id.clone()
     }
 
     async fn dispose(mut self: Box<Self>) -> Result<(), AppError> {
@@ -327,13 +330,23 @@ impl ClaudeRunner {
             Some(b) => b,
             None => spawn::find_claude_binary(None).ok_or_else(spawn::binary_missing_error)?,
         };
-        let session_id = uuid::Uuid::new_v4().to_string();
+        // Resume the CLI's own conversation when we have its id, rather
+        // than rebuilding history ourselves: a resumed session restores the
+        // full agentic loop — prior tool calls *and* their results — so the
+        // model neither forgets nor re-issues MCP calls it already made.
+        // A fresh spawn names the conversation instead, and the caller
+        // persists that name for next time.
+        let session_id = match config.resume.as_deref() {
+            Some(id) => id.to_string(),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+        let resuming = config.resume.is_some();
 
         // `--allowedTools "mcp__mnemos"` (spawn.rs's argv builder) is what
         // makes v1's read-only MCP tools need no approval-flow UI —
         // `--permission-mode` itself never has to move off the safe
-        // `default` LLD-07 §6.3 warns to stay on (see spawn.rs's doc
-        // comment for the real-CLI verification behind this).
+        // `default` (see spawn.rs's doc comment for the real-CLI
+        // verification behind this).
         let mcp_config_path = match &config.mcp {
             Some(mcp) => {
                 let path = crate::fs::paths::mcp_config_path(&session_id)?;
@@ -352,10 +365,23 @@ impl ClaudeRunner {
             permission_mode: "default",
             system_prompt: config.system_prompt.as_deref(),
             session_id: &session_id,
+            resuming,
             mcp_config_path: mcp_config_path_str.as_deref(),
         });
 
         let mut command = Command::new(&binary);
+        // Pin the cwd. A Finder-launched `.app` inherits `launchd`'s
+        // working directory (`/`), the CLI derives its project root from
+        // its cwd, and scanning `/` walks the user's Documents, Desktop,
+        // Downloads, iCloud Drive and `~/Library` — one macOS consent
+        // prompt each, none of them anything the user asked for. See
+        // `fs::paths::agent_cwd`. Best-effort: if the directory can't be
+        // created, leave the cwd alone rather than failing the spawn — a
+        // degraded prompt experience beats a chat/extraction that can't
+        // run at all.
+        if let Ok(cwd) = crate::fs::paths::agent_cwd() {
+            command.current_dir(cwd);
+        }
         command
             .args(&argv)
             .stdin(std::process::Stdio::piped())
@@ -363,12 +389,12 @@ impl ClaudeRunner {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             // Never inject API-key auth — the CLI owns its own OAuth
-            // session (LLD-07 §4.3).
+            // session.
             .env_remove("ANTHROPIC_API_KEY")
-            // PROVISIONAL courtesy attribution header (LLD-07 §4.2);
+            // Courtesy attribution header;
             // harmless if the CLI doesn't recognize it.
             .env("CLAUDE_CODE_ENTRYPOINT", "mnemos");
-        crate::procutil::suppress_console_window(&mut command);
+        crate::procutil::suppress_console_window_tokio(&mut command);
 
         let mut child = match command.spawn() {
             Ok(c) => c,
@@ -399,7 +425,7 @@ impl ClaudeRunner {
         // `claude` under `--input-format stream-json` prints *nothing*,
         // not even `system/init`, until it has received the first
         // stream-json user-message line on stdin. Blocking here for an
-        // init frame (as LLD-07 §4.2's original sketch assumed) deadlocks:
+        // init frame deadlocks:
         // nothing will ever arrive before `prompt()` writes the first
         // turn. `system/init` is instead swallowed as an ordinary frame at
         // the start of the first turn's drain (`translate::translate`),
@@ -411,6 +437,7 @@ impl ClaudeRunner {
         self.raw_rx = Some(raw_rx);
         self.stderr_tail = Some(stderr_tail);
         self.mcp_config_path = mcp_config_path;
+        self.runner_session_id = Some(session_id);
         self.config = Some(config);
         Ok(())
     }
@@ -432,7 +459,7 @@ async fn send_sigterm(child: &mut Child) {
     #[cfg(not(unix))]
     {
         // Windows has no SIGTERM; `start_kill` is `TerminateProcess`, the
-        // LLD's documented equivalent (LLD-07 §5.3 step 2).
+        // documented equivalent here.
         let _ = child.start_kill();
     }
 }
@@ -613,10 +640,10 @@ async fn exit_info(
     (code, truncate(&stderr, 512))
 }
 
-/// Heuristic classification of a process exit with no terminal frame
-/// (LLD-07 §8 items 2/3/5). The exact "not logged in" marker string is
-/// PROVISIONAL — this wave never exercised a real logged-out `claude`
-/// install (see LLD's Implementation status).
+/// Heuristic classification of a process exit with no terminal frame.
+/// The exact "not logged in" marker string is
+/// PROVISIONAL — never exercised against a real logged-out `claude`
+/// install.
 fn classify_exit(exit_code: Option<i32>, stderr_snippet: &str) -> String {
     let lower = stderr_snippet.to_lowercase();
     if lower.contains("not logged in")
@@ -656,6 +683,7 @@ mod tests {
 
     fn extraction_config(model: &str) -> RunnerConfig {
         RunnerConfig {
+            resume: None,
             model: model.to_string(),
             timeout_ms: Some(5_000),
             system_prompt: None,
@@ -702,7 +730,6 @@ cat >/dev/null
         let mut stream = runner
             .prompt(PromptRequest {
                 content: vec![UserContent::Text("hi".into())],
-                history: vec![],
                 turn_id: None,
             })
             .await
@@ -755,7 +782,6 @@ cat >/dev/null
         let mut stream = runner
             .prompt(PromptRequest {
                 content: vec![UserContent::Text("hi".into())],
-                history: vec![],
                 turn_id: None,
             })
             .await
@@ -809,7 +835,6 @@ printf '%s\n' '{"is_error":false,"stop_reason":"end_turn","session_id":"t","usag
         let mut stream = runner
             .prompt(PromptRequest {
                 content: vec![UserContent::Text("hi".into())],
-                history: vec![],
                 turn_id: Some("turn-1".to_string()),
             })
             .await
@@ -837,7 +862,7 @@ printf '%s\n' '{"is_error":false,"stop_reason":"end_turn","session_id":"t","usag
         );
 
         // Give the SIGTERM a moment to land, then verify the process is
-        // actually gone (LLD-07 DoD: "cancel_turn works (SIGTERM verified)").
+        // actually gone (cancel_turn must work with SIGTERM verified).
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !runner.debug_child_alive().await,
@@ -869,7 +894,6 @@ cat >/dev/null
         let _stream = runner
             .prompt(PromptRequest {
                 content: vec![UserContent::Text("hi".into())],
-                history: vec![],
                 turn_id: Some("real-turn".to_string()),
             })
             .await
@@ -925,7 +949,6 @@ cat >/dev/null
         let result = runner
             .prompt(PromptRequest {
                 content: vec![UserContent::Text("hi".into())],
-                history: vec![],
                 turn_id: None,
             })
             .await;

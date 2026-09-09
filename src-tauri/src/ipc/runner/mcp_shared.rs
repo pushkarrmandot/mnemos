@@ -12,18 +12,24 @@ use std::path::PathBuf;
 use crate::error::AppError;
 
 /// Name the `mnemos-mcp-server` binary is registered under in the `mcp.json`
-/// any runner writes (LLD-07 §6.1) — also what `--allowedTools` pre-approves
+/// any runner writes — also what `--allowedTools` pre-approves
 /// (`mcp__mnemos`).
 pub const MCP_SERVER_NAME: &str = "mnemos";
 
-/// The second `[[bin]]` target W16 shipped in the same package as this one
-/// (LLD-08's Implementation status — not a separate crate). No production
+/// The second `[[bin]]` target shipped in the same package as this one —
+/// not a separate crate. No production
 /// sidecar-bundler packaging exists yet (same gap `lib.rs::worker_config`
 /// already flags for the Python worker/Swift sidecar), so dev and prod both
 /// resolve it the same way: a sibling of this process's own executable —
-/// `cargo` already places `mnemos-mcp-server` next to `mnemos-tauri` in
+/// `cargo` already places `mnemos_mcp_server` next to `mnemos-tauri` in
 /// `target/{debug,release}/`, and a future sidecar bundler would place it
 /// next to the bundled app binary too.
+///
+/// The on-disk filename is underscored (`mnemos_mcp_server`), not hyphenated
+/// like the source directory (`src/bin/mnemos-mcp-server/`) — the `[[bin]]`
+/// target in `Cargo.toml` is named with an underscore on purpose, to match
+/// the PDB filename rustc derives from the crate name, which the Tauri NSIS
+/// bundler also keys off of. See the comment on that `[[bin]]` entry.
 pub fn find_mcp_server_binary(configured_path: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = configured_path {
         let path = PathBuf::from(p);
@@ -32,9 +38,9 @@ pub fn find_mcp_server_binary(configured_path: Option<&str>) -> Option<PathBuf> 
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let name = if cfg!(windows) {
-        "mnemos-mcp-server.exe"
+        "mnemos_mcp_server.exe"
     } else {
-        "mnemos-mcp-server"
+        "mnemos_mcp_server"
     };
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
@@ -78,9 +84,9 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let dir = exe.parent().unwrap().to_path_buf();
         let name = if cfg!(windows) {
-            "mnemos-mcp-server.exe"
+            "mnemos_mcp_server.exe"
         } else {
-            "mnemos-mcp-server"
+            "mnemos_mcp_server"
         };
         let candidate = dir.join(name);
         let already_present = candidate.is_file();

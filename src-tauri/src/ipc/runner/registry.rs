@@ -32,8 +32,8 @@ impl RunnerKind {
         }
     }
 
-    /// This runner's default chat model — each vendor pins its own (LLD-07
-    /// §4.4); there is no cross-runner "default model" concept.
+    /// This runner's default chat model — each vendor pins its own;
+    /// there is no cross-runner "default model" concept.
     pub const fn default_chat_model(self) -> &'static str {
         match self {
             RunnerKind::Claude => super::claude::MODEL_IDS.chat_default,
@@ -46,15 +46,15 @@ impl RunnerKind {
         }
     }
 
-    /// Onboarding's proactive "is this agent installed" check (W15) — the
+    /// Onboarding's proactive "is this agent installed" check — the
     /// same PATH-scan `find_claude_binary` already uses internally when a
     /// chat/extraction runner is actually spawned, exposed here so
     /// onboarding can gate on it *before* first use instead of only
     /// discovering a missing CLI mid-recording. Deliberately does not also
-    /// try to verify login state: the LLD-07 corrections log flags that
-    /// heuristic (stderr substring matching) as genuinely unverified against
-    /// a real logged-out install, so onboarding only hard-gates on
-    /// "installed", matching the locked `01_ONBOARDING.md` spec.
+    /// try to verify login state: that heuristic (stderr substring matching)
+    /// is genuinely unverified against a real logged-out install, so
+    /// onboarding only hard-gates on "installed", matching the locked
+    /// `01_ONBOARDING.md` spec.
     pub fn detect(self) -> RunnerDetection {
         match self {
             RunnerKind::Claude => {
