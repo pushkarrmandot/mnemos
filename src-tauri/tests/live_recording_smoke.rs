@@ -1,4 +1,4 @@
-//! W9 opt-in live smoke test (LLD-07 §9's "live-call opt-in" pattern,
+//! Opt-in live smoke test (the "live-call opt-in" pattern,
 //! already used by `ipc/runner/extraction_handler.rs`'s
 //! `run_extraction_against_the_real_claude_cli`). Not run in CI.
 //!

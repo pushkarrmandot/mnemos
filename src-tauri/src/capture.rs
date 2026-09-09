@@ -1,11 +1,11 @@
-//! Cross-platform capture event vocabulary (LLD-03 §3.3, §4.3). The macOS
+//! Cross-platform capture event vocabulary. The macOS
 //! sidecar (line-delimited JSON on stdout, `ipc/swift.rs`) and the Windows
 //! worker capture thread (`capture_event` JSON-RPC notifications routed
 //! through `ipc/python.rs`) both normalize into this one enum, so any
-//! downstream reader (the future `RecordingService`, W7b/W9) never
+//! downstream reader (`commands::recording`) never
 //! special-cases which platform produced an event.
 //!
-//! v1/W7a scope: capture only. No transcription types here (W7b).
+//! v1 scope: capture only. No transcription types here.
 
 use serde::Deserialize;
 
@@ -43,8 +43,8 @@ pub enum CaptureEvent {
         kind: String,
         message: String,
     },
-    /// Sidecar exited without a `Stopped` event (crash / kill) — LLD-02
-    /// §8.2. Windows has no separate process to exit, so the capture
+    /// Sidecar exited without a `Stopped` event (crash / kill).
+    /// Windows has no separate process to exit, so the capture
     /// thread's `Stopped` is always terminal there and `Exited` is
     /// mac-only in practice, but the variant is shared so a reader written
     /// against one platform still compiles against the other.
@@ -55,7 +55,7 @@ pub enum CaptureEvent {
 }
 
 /// Normalizes a Windows `capture_event` JSON-RPC notification payload
-/// (LLD-03 §3.2 table: `{conversation_id, kind: "started"|"level"|...}`)
+/// (`{conversation_id, kind: "started"|"level"|...}`)
 /// into the same `CaptureEvent` the mac sidecar produces. Windows has no
 /// `ready`/`exited` kinds (no separate process to hand-shake with or
 /// silently exit) and no `Chunk`-vs-other split beyond the shared kinds.
@@ -64,8 +64,8 @@ pub enum CaptureEvent {
 /// ("started"/"level"/"warning"/"error"/...), so a `warning`/`error`
 /// event's own sub-kind (`no_mic_signal`, `mic_disconnected`, ...) can't
 /// also live in `kind` without colliding. This normalizer reads it from
-/// `warning_kind`/`error_kind` instead — the worker-side emitter (W7b, not
-/// built this wave) must use those field names.
+/// `warning_kind`/`error_kind` instead — the worker-side emitter uses those
+/// field names (see `mnemos_worker/capture/wasapi.py`).
 pub fn capture_event_from_notification(v: &serde_json::Value) -> Option<CaptureEvent> {
     let kind = v.get("kind")?.as_str()?;
     match kind {

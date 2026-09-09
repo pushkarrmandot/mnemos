@@ -17,18 +17,30 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// flash open when spawned from this GUI-subsystem app. No-op on non-Windows
 /// platforms. Call before `.spawn()`.
 ///
-/// Generic over `C` so it works on both `std::process::Command` (used for
-/// the `claude` CLI and `cmd /C start` spawns) and `tokio::process::Command`
-/// (used for the Python worker spawn) — both implement
-/// `std::os::windows::process::CommandExt` on Windows, so one function body
-/// covers every call site instead of repeating the `#[cfg(windows)]` block
-/// three times.
+/// `tokio::process::Command` does NOT implement
+/// `std::os::windows::process::CommandExt` — it's a distinct wrapper type
+/// with its own inherent `creation_flags` method (this was originally
+/// written as one function generic over that std trait, which compiles fine
+/// on macOS since none of this is `#[cfg(windows)]`-active there, but fails
+/// to build on real Windows; caught only once this actually got compiled on
+/// a Windows target). Two entry points instead: one per `Command` type.
 #[cfg(windows)]
-pub fn suppress_console_window<C: std::os::windows::process::CommandExt>(command: &mut C) {
+pub fn suppress_console_window_std(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-pub fn suppress_console_window<C>(command: &mut C) {
+pub fn suppress_console_window_std(command: &mut std::process::Command) {
+    let _ = command;
+}
+
+#[cfg(windows)]
+pub fn suppress_console_window_tokio(command: &mut tokio::process::Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub fn suppress_console_window_tokio(command: &mut tokio::process::Command) {
     let _ = command;
 }

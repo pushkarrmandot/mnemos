@@ -7,8 +7,8 @@ import { qk, staleTimes } from "@/queries/keys";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<RecordingRecoveryModal>` — 12_CORNER_CASES.md "App crashes & recovery"
- * §Mid-recording crash: "Mnemos crashed during a recording. Recover it?".
+ * `<RecordingRecoveryModal>` — "App crashes & recovery", mid-recording
+ * crash case: "Mnemos crashed during a recording. Recover it?".
  * Opened by `useCrashRecoveryCheck` (mounted once in `<AppShell>`); reads
  * the same `qk.interruptedRecordings()` cache that hook populated rather
  * than issuing its own fetch, so the two never disagree about the list.
@@ -37,13 +37,14 @@ export function RecordingRecoveryModal() {
     staleTime: staleTimes.never,
   });
 
-  // W17b: neither mutation used to close the modal — once the last pending
-  // item was resolved, `RecordingRecoveryModal` started rendering `null`
-  // (see `if (!current) return null` below) but `useUIStore`'s `modal`
-  // slot stayed stuck on `"recording-recovery"` forever (nothing else
-  // resets it), which silently blocked `useStuckProcessingCheck`'s own
-  // modal — a second real crash-recovery prompt — from ever opening if it
-  // lost the race to this one on the same boot.
+  // Neither mutation closes the modal on its own: once the last pending
+  // item is resolved, `RecordingRecoveryModal` renders `null`
+  // (see `if (!current) return null` below), so something has to reset
+  // `useUIStore`'s `modal` slot explicitly or it would stay stuck on
+  // `"recording-recovery"` forever (nothing else resets it) — which would
+  // silently block `useStuckProcessingCheck`'s own modal — a second real
+  // crash-recovery prompt — from ever opening if it lost the race to this
+  // one on the same boot.
   const closeIfLast = () => {
     if ((interrupted.data?.length ?? 0) <= 1) {
       useUIStore.getState().closeModal();

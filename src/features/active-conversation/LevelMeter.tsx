@@ -60,9 +60,9 @@ function lerp(a: Rgb, b: Rgb, t: number): string {
 }
 
 /**
- * The meter's amber → recording-red → violet sweep (LLD-11 debug-session
- * patch — "painted gradient" direction the user picked over a flat
- * `bg-recording` fill). Colors come only from `--waveform-gradient-{1,2,3}`
+ * The meter's amber → recording-red → violet sweep — the "painted gradient"
+ * direction the user picked over a flat `bg-recording` fill. Colors come
+ * only from `--waveform-gradient-{1,2,3}`
  * (`design/tokens.css`) — never hardcoded here — so retheming those tokens
  * (including a future light/dark toggle) repaints this with no code change.
  * Position in the row decides each bar's color, not its live height, so the

@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 import { jsonStorage } from "./persist";
 
 /**
- * Active-recording state machine (LLD-10 §3.2).
+ * Active-recording state machine.
  *
  *   idle ──arm──▶ arming ──markRecording──▶ recording ⇄ paused
  *                                               │
@@ -35,7 +35,7 @@ export interface TranscriptTurn {
   text: string;
   tsStartMs: number;
   tsEndMs: number;
-  /** LLD-03 §5.2 duplicate-suppression flag. */
+  /** Duplicate-suppression flag. */
   superseded?: boolean;
 }
 
@@ -66,7 +66,7 @@ type RecordingState = {
   /** False until the first real `subscribeMicLevel` sample lands — lets
    * `<LevelMeter>` tell "no signal yet" apart from "genuinely silent". */
   micLevelReceived: boolean;
-  /** W17b — true while live transcription is blocked on `ParakeetModel`
+  /** True while live transcription is blocked on `ParakeetModel`
    * warm-up (`liveTranscriptionWarmup` event, `ready: false`). Lets
    * `<LiveTranscriptStream>` tell "still warming up" apart from "genuinely
    * nothing said yet" instead of showing a silent "Listening…" either way. */
@@ -97,7 +97,7 @@ type RecordingState = {
   setPos: (pos: FloatingPanePos) => void;
 };
 
-/** Session-scoped fields only — `paneMode` / `pos` survive a reset (§3.6). */
+/** Session-scoped fields only — `paneMode` / `pos` survive a reset. */
 const SESSION_DEFAULTS = {
   state: "idle",
   prevState: null,
@@ -118,7 +118,7 @@ const SESSION_DEFAULTS = {
  * States where capture is actually still running (or about to be) — shared
  * by every surface that needs to decide "does this conversation currently
  * own the live recording session" (`TopBar`'s Record button, `ConversationRow`'s
- * link target, the Conversation Detail route's redirect guard — LLD-11 §1/§6).
+ * link target, the Conversation Detail route's redirect guard).
  * Deliberately excludes `finalizing`/`transcribing`: those cover the
  * *previous* conversation's post-stop pipeline, which is no longer "live".
  */
@@ -132,9 +132,9 @@ export const ACTIVE_CAPTURE_STATES: readonly RecState[] = [
 /**
  * States where the UI must not surface a fresh Record affordance. `arm()` from
  * one of these is refused; from `transcribing` it force-resets first, which is
- * the re-entrant guard in §3.2 — the late `conversationReady` for the prior
+ * the re-entrant guard — the late `conversationReady` for the prior
  * conversation then no longer matches `conversationId` and leaves the store
- * alone (§6).
+ * alone.
  */
 const BUSY_STATES: readonly RecState[] = [
   "arming",
@@ -145,8 +145,8 @@ const BUSY_STATES: readonly RecState[] = [
 ];
 
 /**
- * Streaming ASR revises the tail turn in place rather than appending: LLD-03
- * §5.2 emits the same `tsStartMs` with a longer `text` as the hypothesis firms
+ * Streaming ASR revises the tail turn in place rather than appending: it
+ * emits the same `tsStartMs` with a longer `text` as the hypothesis firms
  * up.
  */
 function supersedes(prev: TranscriptTurn | undefined, next: TranscriptTurn): boolean {
@@ -230,7 +230,7 @@ export const useRecordingStore = create<RecordingState>()(
       name: "mnemos.recording",
       storage: jsonStorage(),
       // Restore chrome only. `state`, `liveTranscript` and `notesDraft` are
-      // session-scoped and must not survive a quit (LLD-10 §3.6).
+      // session-scoped and must not survive a quit.
       partialize: (state) => ({ paneMode: state.paneMode, pos: state.pos }),
     },
   ),

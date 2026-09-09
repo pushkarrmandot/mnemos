@@ -1,16 +1,16 @@
-//! `recording.*` Tauri commands (W9, LLD-11 §3.1 / §5). This is the glue
-//! layer LLD-02/LLD-03's "Implementation status" sections both left for
-//! this wave: a session registry mapping a small `u32` session id (what the
-//! React store already calls `sessionId`, LLD-10 §3.2) to the real
+//! `recording.*` Tauri commands. This is the glue
+//! layer the design docs' "Implementation status" sections left unbuilt:
+//! a session registry mapping a small `u32` session id (what the
+//! React store already calls `sessionId`) to the real
 //! `conversation_id`, the capture control handle, and the running post-stop
 //! pipeline — plus the Channel/notification forwarding that turns the
 //! worker's `live_transcript_chunk` broadcast and the platform capture
-//! stream into what `useLiveTranscriptChannel` (W3, already built) expects.
+//! stream into what `useLiveTranscriptChannel` (already built) expects.
 //!
 //! Mic-level Channel (`subscribe_mic_level`/`unsubscribe_mic_level`) and
-//! `pause`/`resume` were added post-v1-wave (debug-session patch): the
+//! `pause`/`resume` were added later (debug-session patch): the
 //! capture-side transport for both (`CaptureEvent::Level`, Swift/WASAPI
-//! `pause`/`resume`) already existed from W7a — only the Tauri command layer
+//! `pause`/`resume`) already existed — only the Tauri command layer
 //! and Channel forwarding were missing.
 //!
 //! Windows parity audit findings #6/#7: `CAPTURE_EVENT_TOPIC` is now
@@ -32,7 +32,8 @@ use std::sync::Mutex as StdMutex;
 use serde::Serialize;
 use specta::Type;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_specta::Event;
 use tokio::sync::broadcast;
 
 use crate::capture::CaptureEvent;
@@ -44,10 +45,11 @@ use crate::ipc::python::{
     SubscribeLiveTranscript, TranscribeFinal, UnsubscribeLiveTranscript,
     LIVE_TRANSCRIPTION_WARMUP_TOPIC, LIVE_TRANSCRIPT_CHUNK_TOPIC,
 };
+use crate::memory::DEFAULT_CONVERSATION_TITLE;
 use crate::state::AppState;
 
-/// One turn streamed to the React `LiveTranscriptStream` (LLD-10 §5.1's
-/// `TranscriptChunk`, mirrored field-for-field so `useLiveTranscriptChannel`
+/// One turn streamed to the React `LiveTranscriptStream` (`TranscriptChunk`,
+/// mirrored field-for-field so `useLiveTranscriptChannel`
 /// needs no change to consume the real transport).
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct TranscriptChunk {
@@ -75,8 +77,8 @@ pub struct LevelSample {
 pub struct StartRecordingResult {
     pub session_id: u32,
     pub conversation_id: String,
-    /// Always `None` at start — recordings never require a project (W15
-    /// design decision). Assignable any time via the project chip.
+    /// Always `None` at start — recordings never require a project (a
+    /// deliberate design decision). Assignable any time via the project chip.
     pub project_id: Option<String>,
     pub started_at_ms: i64,
 }
@@ -86,7 +88,7 @@ pub struct StopRecordingResult {
     pub conversation_id: String,
     /// True when the recording had under 5s of audio in both files —
     /// mirrors `recover_interrupted_recording`'s and the capture-failure
-    /// path's identical threshold (LLD-03 §9 failure mode #2). The
+    /// path's identical threshold. The
     /// conversation row is deleted rather than handed to a pipeline that
     /// would either crash on an effectively-empty WAV or produce a useless
     /// empty transcript. The frontend shows a toast and stays put instead
@@ -100,8 +102,14 @@ struct ActiveSession {
     mic_path: PathBuf,
     system_path: PathBuf,
     started_at_ms: i64,
+    /// When the recording was paused, or `None` while it's running. Doubles
+    /// as the paused flag and as the frozen elapsed-time reading the tray
+    /// shows — while paused the frontend's clock stops
+    /// (`useRecordingTick` skips the `paused` state), so the menu bar has to
+    /// stop at the same number rather than keep counting.
+    paused_at_ms: Option<i64>,
     transcript_forward_task: Option<tokio::task::JoinHandle<()>>,
-    /// W17b: the `LIVE_TRANSCRIPTION_WARMUP_TOPIC` forwarding task spawned
+    /// The `LIVE_TRANSCRIPTION_WARMUP_TOPIC` forwarding task spawned
     /// alongside `transcript_forward_task` in `subscribe_transcript` — kept
     /// separate (not folded into one task) but tracked the same way so it
     /// doesn't outlive the session it was spawned for.
@@ -131,7 +139,7 @@ pub struct RecordingRegistry {
 
 impl RecordingRegistry {
     /// Keeps an in-flight recording's cached `project_id` in sync after a
-    /// project (re)assignment (W15 design decision: the chip is editable
+    /// project (re)assignment (the chip is deliberately editable
     /// "before, during, after recording, or never") — `stop_recording`'s
     /// post-pipeline memory-refresh trigger reads this cached value to know
     /// which project's memory doc to refresh. `mic_path`/`system_path` need
@@ -159,8 +167,8 @@ impl RecordingRegistry {
     }
 
     /// Removes and returns the session for `conversation_id`, if one is
-    /// still registered. Used by the mid-recording failure path (gap #6,
-    /// LLD-03 §9 failure modes #1-#3, `handle_capture_failure` below): the
+    /// still registered. Used by the mid-recording failure path
+    /// (`handle_capture_failure` below): the
     /// capture-watch task only knows the `conversation_id`, not the
     /// ephemeral `session_id` the React store uses, so it can't call the
     /// ordinary `stop_recording` command handler (which is keyed by
@@ -173,6 +181,48 @@ impl RecordingRegistry {
             .find(|(_, s)| s.conversation_id == conversation_id)
             .map(|(id, _)| *id)?;
         sessions.remove(&id)
+    }
+
+    /// Whether any recording is currently in flight — `commands::updater`
+    /// checks this before installing an update, since relaunching the app
+    /// mid-recording would kill the in-progress capture, and
+    /// `commands::tray` before letting Quit through.
+    pub fn has_active_session(&self) -> bool {
+        !self.sessions.lock().unwrap().is_empty()
+    }
+
+    /// Marks the session paused (or running again), returning `false` if it
+    /// has already been torn down. The timestamp is what freezes the tray's
+    /// elapsed clock; see `ActiveSession::paused_at_ms`.
+    fn set_paused(&self, session_id: u32, paused: bool) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(session) = sessions.get_mut(&session_id) else {
+            return false;
+        };
+        session.paused_at_ms = paused.then(now_ms);
+        true
+    }
+
+    /// The registry's own answer to "what should the menu bar show" — the
+    /// single source `commands::tray` renders from. Lives here rather than in
+    /// that module so the lock is never held across a `.await`.
+    pub(crate) fn tray_snapshot(&self) -> crate::commands::tray::TrayState {
+        use crate::commands::tray::TrayState;
+
+        let sessions = self.sessions.lock().unwrap();
+        // v1 never has two, but "the oldest one" is a defined answer rather
+        // than whichever the hash map happens to yield first.
+        let Some(session) = sessions.values().min_by_key(|s| s.started_at_ms) else {
+            return TrayState::Idle;
+        };
+        match session.paused_at_ms {
+            Some(paused_at_ms) => TrayState::Paused {
+                elapsed_s: (paused_at_ms - session.started_at_ms) / 1000,
+            },
+            None => TrayState::Recording {
+                elapsed_s: (now_ms() - session.started_at_ms) / 1000,
+            },
+        }
     }
 }
 
@@ -233,22 +283,32 @@ fn session_not_found(session_id: u32) -> AppError {
     }
 }
 
-fn emit_progress(app: &AppHandle, conversation_id: &str, step: &str, status: &str, pct: f64) {
-    let _ = app.emit(
-        "processing-progress",
-        serde_json::json!({
-            "conversation_id": conversation_id,
-            "step": step,
-            "status": status,
-            "pct": pct,
-        }),
-    );
+/// `pct` is `None` for steps whose duration cannot be measured — saving the
+/// recording (sub-second) and extraction (a streaming model call with no
+/// fraction to read). Those render as a spinner and a label with no number,
+/// which is honest; the previous hardcoded 0.05/0.6/0.8 milestones looked
+/// like measurements and were not. Only `transcribing` reports a real
+/// fraction, fed from the worker's per-chunk `job_progress` reports.
+fn emit_progress(
+    app: &AppHandle,
+    conversation_id: &str,
+    step: &str,
+    status: &str,
+    pct: Option<f64>,
+) {
+    let _ = crate::events::ProcessingProgress {
+        conversation_id: conversation_id.to_string(),
+        step: step.to_string(),
+        status: status.to_string(),
+        pct,
+    }
+    .emit(app);
 }
 
 /// Starts a recording session: creates the `conversations` row, spawns
 /// platform capture (mac sidecar / Windows WASAPI thread via the worker),
-/// and starts the worker's live-transcription poll loop. LLD-11 §5's
-/// `idle -> arming -> recording` — this command is what `arming` waits on.
+/// and starts the worker's live-transcription poll loop. The
+/// `idle -> arming -> recording` UI flow: this command is what `arming` waits on.
 #[tauri::command]
 #[specta::specta]
 pub async fn start_recording(
@@ -256,25 +316,25 @@ pub async fn start_recording(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<StartRecordingResult, AppError> {
-    // Recordings never *require* a project (W15 design decision) — Record
-    // starts with zero project gate, and `None` here is a first-class,
-    // permanent state. The chip stays editable before, during, after, or
-    // never.
+    // Recordings never *require* a project (a deliberate design decision) —
+    // Record starts with zero project gate, and `None` here is a
+    // first-class, permanent state. The chip stays editable before, during,
+    // after, or never.
     //
-    // W17c: but when the caller *does* know the project (Project Detail's
-    // Record button, the top bar's project picker), it is now set at row
-    // creation. This used to be hardcoded `None` with the frontend firing a
-    // follow-up `conversation_set_project` whose failure was silently
-    // swallowed — so a recording started from a project could land unfiled
-    // with no error shown anywhere, and both the chip and the Recent
-    // Conversations row would just quietly read "No project".
+    // But when the caller *does* know the project (Project Detail's Record
+    // button, the top bar's project picker), it is set at row creation
+    // rather than hardcoded `None` with the frontend firing a follow-up
+    // `conversation_set_project` whose failure was silently swallowed — that
+    // older shape let a recording started from a project land unfiled with
+    // no error shown anywhere, with both the chip and the Recent
+    // Conversations row quietly reading "No project".
     let started_at = now_ms() / 1000;
 
     let conversation = state
         .storage
         .insert_conversation(NewConversation {
             project_id: project_id.clone(),
-            title: "Untitled Conversation".into(),
+            title: DEFAULT_CONVERSATION_TITLE.into(),
             started_at,
             runner_id: None,
         })
@@ -338,6 +398,7 @@ pub async fn start_recording(
             mic_path,
             system_path,
             started_at_ms,
+            paused_at_ms: None,
             transcript_forward_task: None,
             warmup_forward_task: None,
             level_tx,
@@ -348,7 +409,7 @@ pub async fn start_recording(
         },
     );
 
-    set_tray_recording(&app, true);
+    crate::commands::tray::refresh(&app).await;
 
     state.metrics.track(
         crate::metrics::events::RECORDING_STARTED,
@@ -395,8 +456,8 @@ async fn start_platform_capture(
 
     // Drain capture events so the mpsc channel never backs up. `Level`
     // publishes onto this session's broadcast channel for the mic-level
-    // meter (`subscribe_mic_level`). `Error`/`Exited` are gap #6 (LLD-03 §9
-    // failure modes #1-#3): both are terminal for this recording, so both
+    // meter (`subscribe_mic_level`). `Error`/`Exited`
+    // are both terminal for this recording, so both
     // route through the same `handle_capture_failure` — it emits
     // `events.recordingWarning` for the UI, then either salvages the
     // partial audio through the normal pipeline or discards it, exactly
@@ -444,22 +505,21 @@ async fn start_platform_capture(
     Ok((Some(handle.control), Some(watch_task)))
 }
 
-/// Gap #6 (LLD-03 §9 failure modes #1-#3). Called from the platform
-/// capture-watch task (mac sidecar events, or — per Windows parity audit
-/// finding #6 — the Windows `CAPTURE_EVENT_TOPIC` watch task above) the
-/// moment a terminal event arrives (`Error`/`Exited` on mac,
-/// `Error`/`Stopped` on Windows) — there is no user "Stop" click driving
-/// this, so it reconstructs the same tail
+/// Called from the platform capture-watch task (mac sidecar events, or —
+/// per Windows parity audit finding #6 — the Windows `CAPTURE_EVENT_TOPIC`
+/// watch task above) the moment a terminal event arrives (`Error`/`Exited`
+/// on mac, `Error`/`Stopped` on Windows) — there is no user "Stop" click
+/// driving this, so it reconstructs the same tail
 /// `stop_recording`/`recover_interrupted_recording` run: emit the UI-visible
 /// warning first (so the toast lands *before* the conversation disappears
 /// from "currently recording"), tear down the session, then either hand the
 /// partial audio to the normal pipeline (≥5s captured — same threshold
 /// `recover_interrupted_recording` uses) or discard the row (silent-save
-/// behavior, LLD-03 §9 failure mode #2's exact rule).
+/// behavior).
 ///
 /// Disk-full (`kind == "disk_full"`) deliberately reuses this same event
 /// rather than doubling up with `events.storageWarning`/`storageCritical`:
-/// those two are LLD-01's *proactive* low-disk poller (fires before any
+/// those two are the *proactive* low-disk poller (fires before any
 /// write actually fails, while recording could still continue), this one is
 /// the sidecar's own write failing outright (recording is already over) —
 /// different moments, different UI treatment (inline "recording will stop
@@ -469,14 +529,12 @@ async fn start_platform_capture(
 async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, message: &str) {
     let state = app.state::<AppState>();
 
-    let _ = app.emit(
-        "recording-warning",
-        serde_json::json!({
-            "conversation_id": conv_id,
-            "kind": kind,
-            "message": message,
-        }),
-    );
+    let _ = crate::events::RecordingWarning {
+        conversation_id: conv_id.to_string(),
+        kind: kind.to_string(),
+        message: message.to_string(),
+    }
+    .emit(app);
 
     let Some(session) = state.recording.take_by_conversation_id(conv_id) else {
         // Already torn down by a concurrent `stop_recording` — nothing left
@@ -484,7 +542,7 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
         // failed; whichever won the race already ran the tail).
         return;
     };
-    set_tray_recording(app, false);
+    crate::commands::tray::refresh(app).await;
 
     if let Some(task) = &session.transcript_forward_task {
         task.abort();
@@ -532,8 +590,8 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
     const MIN_AUDIO_BYTES: u64 = BYTES_PER_SEC * 5;
 
     if mic_bytes < MIN_AUDIO_BYTES && system_bytes < MIN_AUDIO_BYTES {
-        // LLD-03 §9 failure mode #2's exact rule: below 5s captured, delete
-        // the row instead of running a pipeline over nothing.
+        // Below 5s captured: delete the row instead of running a pipeline
+        // over nothing.
         if let Err(err) = state.storage.delete_conversation(conv_id).await {
             tracing::error!(conv_id, error = %err, "recording.capture_failure_delete_failed");
         }
@@ -563,7 +621,7 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
         tracing::error!(conv_id, error = %err, "recording.capture_failure_pipeline_init_failed");
         return;
     }
-    emit_progress(app, conv_id, "finalizing", "running", 0.05);
+    emit_progress(app, conv_id, "finalizing", "running", None);
 
     tokio::spawn(run_post_recording_pipeline(
         app.clone(),
@@ -581,8 +639,7 @@ async fn handle_capture_failure(app: &AppHandle, conv_id: &str, kind: &str, mess
 /// `subscribe_transcript` already uses for `LIVE_TRANSCRIPT_CHUNK_TOPIC`)
 /// and drains it for this conversation, mirroring the mac branch's sidecar
 /// event-channel watch task above: `Level` publishes onto `level_tx` (what
-/// `subscribe_mic_level` feeds the React level meter from — previously
-/// ignored entirely on this branch), `Warning` is log-only (matches mac's
+/// `subscribe_mic_level` feeds the React level meter from), `Warning` is log-only (matches mac's
 /// non-fatal `no_mic_signal`/etc. handling), and `Error`/`Stopped` are both
 /// terminal — `capture::CaptureEvent`'s doc comment already anticipated
 /// this: Windows has no separate process to `Exited`, so the capture
@@ -667,8 +724,8 @@ async fn start_platform_capture(
 
 /// Forwards the worker's `live_transcript_chunk` broadcast (filtered to this
 /// session's conversation) into the Tauri `Channel` React subscribed
-/// through — the "reader task" both LLD-02 and LLD-03's Implementation
-/// status sections left for this wave.
+/// through — the "reader task" the design docs' Implementation
+/// status sections left unbuilt.
 #[tauri::command]
 #[specta::specta]
 pub async fn subscribe_transcript(
@@ -692,7 +749,7 @@ pub async fn subscribe_transcript(
     );
 
     let python = state.python.clone();
-    // W17b: a second small forwarding task, same shape as the one below but
+    // A second small forwarding task, same shape as the one below but
     // for `LIVE_TRANSCRIPTION_WARMUP_TOPIC` — tracked in its own
     // `session.warmup_forward_task` slot (not folded into the transcript
     // one) so aborting either independently stays possible, but both get
@@ -710,13 +767,11 @@ pub async fn subscribe_transcript(
                     if notif.conversation_id != warmup_conversation_id {
                         continue;
                     }
-                    let _ = warmup_app.emit(
-                        "live-transcription-warmup",
-                        serde_json::json!({
-                            "conversation_id": notif.conversation_id,
-                            "ready": notif.ready,
-                        }),
-                    );
+                    let _ = crate::events::LiveTranscriptionWarmup {
+                        conversation_id: notif.conversation_id,
+                        ready: notif.ready,
+                    }
+                    .emit(&warmup_app);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -881,13 +936,11 @@ pub async fn unsubscribe_mic_level(
     Ok(())
 }
 
-/// Pauses capture (LLD-11 §3.1's Pause). The capture-side transport already
-/// existed from W7a (`SidecarControl::pause`/Swift `pause` / worker
-/// `pause_capture`); this command is the missing Tauri layer over it.
+/// Suspends the platform capture. Only the transport differs per platform —
+/// the registry bookkeeping around it is shared, so it lives in
+/// [`pause_recording`] rather than being written twice.
 #[cfg(target_os = "macos")]
-#[tauri::command]
-#[specta::specta]
-pub async fn pause_recording(state: State<'_, AppState>, session_id: u32) -> Result<(), AppError> {
+async fn suspend_capture(state: &AppState, session_id: u32) -> Result<(), AppError> {
     let sidecar = {
         let sessions = state.recording.sessions.lock().unwrap();
         sessions
@@ -903,9 +956,7 @@ pub async fn pause_recording(state: State<'_, AppState>, session_id: u32) -> Res
 }
 
 #[cfg(not(target_os = "macos"))]
-#[tauri::command]
-#[specta::specta]
-pub async fn pause_recording(state: State<'_, AppState>, session_id: u32) -> Result<(), AppError> {
+async fn suspend_capture(state: &AppState, session_id: u32) -> Result<(), AppError> {
     let conversation_id = {
         let sessions = state.recording.sessions.lock().unwrap();
         sessions
@@ -920,10 +971,9 @@ pub async fn pause_recording(state: State<'_, AppState>, session_id: u32) -> Res
     Ok(())
 }
 
+/// Resumes the platform capture. Mirror of [`suspend_capture`].
 #[cfg(target_os = "macos")]
-#[tauri::command]
-#[specta::specta]
-pub async fn resume_recording(state: State<'_, AppState>, session_id: u32) -> Result<(), AppError> {
+async fn unsuspend_capture(state: &AppState, session_id: u32) -> Result<(), AppError> {
     let sidecar = {
         let sessions = state.recording.sessions.lock().unwrap();
         sessions
@@ -939,9 +989,7 @@ pub async fn resume_recording(state: State<'_, AppState>, session_id: u32) -> Re
 }
 
 #[cfg(not(target_os = "macos"))]
-#[tauri::command]
-#[specta::specta]
-pub async fn resume_recording(state: State<'_, AppState>, session_id: u32) -> Result<(), AppError> {
+async fn unsuspend_capture(state: &AppState, session_id: u32) -> Result<(), AppError> {
     let conversation_id = {
         let sessions = state.recording.sessions.lock().unwrap();
         sessions
@@ -956,10 +1004,47 @@ pub async fn resume_recording(state: State<'_, AppState>, session_id: u32) -> Re
     Ok(())
 }
 
+/// Pauses capture. The capture side genuinely stops writing samples (the
+/// Swift sidecar drops sample buffers while paused, and the Windows worker
+/// stops its capture) — a pause is a hole in the recording, not a UI-only
+/// freeze.
+///
+/// Marking the registry paused *after* the transport succeeds keeps the two
+/// from disagreeing when the sidecar refuses: a failed pause leaves the
+/// session running, which is what the frontend's own rollback assumes.
+#[tauri::command]
+#[specta::specta]
+pub async fn pause_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: u32,
+) -> Result<(), AppError> {
+    suspend_capture(&state, session_id).await?;
+    // `false` only if the session was torn down underneath us; the refresh
+    // below then simply renders whatever the registry does hold.
+    let _ = state.recording.set_paused(session_id, true);
+    crate::commands::tray::refresh(&app).await;
+    Ok(())
+}
+
+/// Resumes capture. See [`pause_recording`] for the ordering rationale.
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: u32,
+) -> Result<(), AppError> {
+    unsuspend_capture(&state, session_id).await?;
+    let _ = state.recording.set_paused(session_id, false);
+    crate::commands::tray::refresh(&app).await;
+    Ok(())
+}
+
 /// Stops capture, transitions the conversation to `Processing`, and kicks
 /// off the rest of the pipeline (`transcribe_final` -> extraction -> done)
 /// in a detached task so this command returns immediately — the caller
-/// navigates to Conversation Detail on `onMutate` (LLD-11 §5) and watches
+/// navigates to Conversation Detail on `onMutate` and watches
 /// `processing-progress` events from there.
 #[tauri::command]
 #[specta::specta]
@@ -975,6 +1060,13 @@ pub async fn stop_recording(
         .unwrap()
         .remove(&session_id)
         .ok_or_else(|| session_not_found(session_id))?;
+
+    // Immediately after the removal, not after the teardown below: the
+    // registry is what the tray renders from, and every line between here
+    // and the end of this function can return early. Leaving the refresh
+    // downstream of a `?` is what previously stranded a "recording" icon in
+    // the menu bar after a failed `stop_platform_capture`.
+    crate::commands::tray::refresh(&app).await;
 
     if let Some(task) = session.transcript_forward_task.take() {
         task.abort();
@@ -998,13 +1090,12 @@ pub async fn stop_recording(
         .await;
 
     stop_platform_capture(&state, &session).await?;
-    set_tray_recording(&app, false);
 
-    // W17b: mirrors `recover_interrupted_recording`'s and the
+    // Mirrors `recover_interrupted_recording`'s and the
     // capture-failure path's identical ≥5s-captured rule — a Stop clicked
     // before the sidecar's first flush (or within a couple of seconds of
-    // Record) previously sailed straight into `run_post_recording_pipeline`
-    // with an effectively-empty WAV, which `transcribe_final` then crashed
+    // Record) would otherwise sail straight into `run_post_recording_pipeline`
+    // with an effectively-empty WAV, which `transcribe_final` then crashes
     // on outright (`ValueError: Negative dimensions not allowed`, verified).
     let mic_bytes = std::fs::metadata(&session.mic_path)
         .map(|m| m.len())
@@ -1049,7 +1140,7 @@ pub async fn stop_recording(
         &session.conversation_id,
         "finalizing",
         "running",
-        0.05,
+        None,
     );
 
     let conversation_id = session.conversation_id.clone();
@@ -1113,8 +1204,39 @@ async fn run_post_recording_pipeline(
     let pipeline_start = std::time::Instant::now();
     let meeting_bucket = duration_bucket(duration_s);
 
-    emit_progress(&app, &conv_id, "transcribing", "running", 0.2);
+    emit_progress(&app, &conv_id, "transcribing", "running", Some(0.0));
     let transcribe_start = std::time::Instant::now();
+
+    // Forward the worker's real per-chunk progress to the UI for as long as
+    // this call runs.
+    //
+    // The worker already emits `job_progress` with a genuine fraction
+    // spanning both audio files — it is what re-arms this request's deadline
+    // — but nothing was consuming it on the way out, so the UI showed a
+    // hardcoded 20% that sat still for the entire pass. On a two-hour
+    // recording that is six and a half minutes of a frozen bar, which reads
+    // as a hung app.
+    //
+    // No request-id correlation is needed: the worker's job executor is
+    // single-threaded by design (the models are not thread-safe — see its
+    // docstring), so at most one job is ever in flight and every tick that
+    // arrives here belongs to this call. The task is aborted below, so it
+    // cannot outlive the transcription and bleed ticks into a later step.
+    let progress_task = {
+        let app = app.clone();
+        let conv_id = conv_id.clone();
+        let mut rx = state
+            .python
+            .subscribe(crate::ipc::python::JOB_PROGRESS_TOPIC);
+        tokio::spawn(async move {
+            while let Ok(params) = rx.recv().await {
+                if let Some(fraction) = params.get("fraction").and_then(|f| f.as_f64()) {
+                    emit_progress(&app, &conv_id, "transcribing", "running", Some(fraction));
+                }
+            }
+        })
+    };
+
     let transcribe = state
         .python
         .send(TranscribeFinal {
@@ -1123,6 +1245,7 @@ async fn run_post_recording_pipeline(
             system_path,
         })
         .await;
+    progress_task.abort();
 
     let transcribe = match transcribe {
         Ok(resp) => resp,
@@ -1151,9 +1274,9 @@ async fn run_post_recording_pipeline(
         transcribe_start.elapsed(),
         meeting_bucket,
     );
-    emit_progress(&app, &conv_id, "transcribing", "done", 0.5);
+    emit_progress(&app, &conv_id, "transcribing", "done", Some(1.0));
 
-    emit_progress(&app, &conv_id, "extracting", "running", 0.6);
+    emit_progress(&app, &conv_id, "extracting", "running", None);
     let extracting_start = std::time::Instant::now();
     let outcome =
         match crate::memory::extract_conversation(&state.storage, &state.python, &conv_id, false)
@@ -1193,16 +1316,16 @@ async fn run_post_recording_pipeline(
         ]),
     );
     // `extract_conversation` already advanced `pipeline_state` to
-    // `Extracting` internally (LLD-05 §4.4's write ordering) — reflects here
+    // `Extracting` internally — reflects here
     // as the "extracting done" progress tick before the (best-effort)
     // project-memory refresh and the final `Done` transition.
-    emit_progress(&app, &conv_id, "extracting", "done", 0.8);
+    emit_progress(&app, &conv_id, "extracting", "done", None);
 
-    // W12a — LLD-05 §5.1 auto-refresh trigger. Best-effort: a refresh
+    // Auto-refresh trigger. Best-effort: a refresh
     // failure is surfaced via `project-memory-refresh-failed`, not by
     // failing this conversation's own pipeline (refresh is project-scoped,
     // not a step of `PipelineStep`). Unfiled conversations (no project
-    // assigned — W15 design decision) have no memory doc to refresh at all.
+    // assigned — recordings never require one) have no memory doc to refresh at all.
     if let Some(project_id) = project_id.clone() {
         match state.storage.get_project(&project_id).await {
             Ok(project) => {
@@ -1217,21 +1340,20 @@ async fn run_post_recording_pipeline(
                 .await
                 {
                     Ok(Some(refresh)) => {
-                        let _ = app.emit(
-                            "project-memory-updated",
-                            serde_json::json!({
-                                "project_id": project_id,
-                                "significant_change": refresh.significant_change,
-                            }),
-                        );
+                        let _ = crate::events::ProjectMemoryUpdated {
+                            project_id,
+                            significant_change: refresh.significant_change,
+                        }
+                        .emit(&app);
                     }
                     Ok(None) => {}
                     Err(err) => {
                         tracing::error!(project_id, error = %err, "recording.auto_refresh_failed");
-                        let _ = app.emit(
-                            "project-memory-refresh-failed",
-                            serde_json::json!({ "project_id": project_id, "error_kind": err.to_string() }),
-                        );
+                        let _ = crate::events::ProjectMemoryRefreshFailed {
+                            project_id,
+                            error_kind: err.to_string(),
+                        }
+                        .emit(&app);
                     }
                 }
             }
@@ -1273,12 +1395,13 @@ async fn run_post_recording_pipeline(
             Some(duration_s),
         )
         .await;
-    emit_progress(&app, &conv_id, "done", "done", 1.0);
+    emit_progress(&app, &conv_id, "done", "done", None);
 
-    let _ = app.emit(
-        "conversation-ready",
-        serde_json::json!({ "conversation_id": conv_id, "project_id": project_id }),
-    );
+    let _ = crate::events::ConversationReady {
+        conversation_id: conv_id,
+        project_id,
+    }
+    .emit(&app);
 }
 
 /// Coarse, closed-set classification of an `AppError` for
@@ -1318,7 +1441,7 @@ async fn fail_pipeline(app: &AppHandle, conv_id: &str, step: &str, err: &AppErro
         .storage
         .update_conversation_status(conv_id, ConversationStatus::Failed, None, None)
         .await;
-    emit_progress(app, conv_id, step, "failed", 0.0);
+    emit_progress(app, conv_id, step, "failed", None);
 }
 
 /// Crash recovery (12_CORNER_CASES.md "App crashes & recovery" §Mid-recording
@@ -1371,7 +1494,7 @@ pub struct RecoverInterruptedResult {
 }
 
 /// 16kHz mono 16-bit PCM, matching every other byte-count-to-duration
-/// calculation in this file/LLD-03 §4.1.
+/// calculation in this file.
 const BYTES_PER_SEC: u64 = 16_000 * 2;
 
 /// Crash recovery's "Recover" action (12_CORNER_CASES.md "App crashes &
@@ -1389,9 +1512,9 @@ const BYTES_PER_SEC: u64 = 16_000 * 2;
 /// milliseconds of audio. Running the full pipeline on that produces a
 /// "transcription" with nothing in it and an extraction step that has
 /// nothing to summarize — a confusing dead end, not a recovered conversation.
-/// Mirrors LLD-03 §9 failure mode #2's own "enqueue `process_conversation`
-/// IF at least 5s of audio was written; otherwise delete the row" rule:
-/// below that threshold this auto-discards (same atomic path as the
+/// Follows the same rule as the rest of the pipeline: enqueue
+/// `process_conversation` if at least 5s of audio was written, otherwise
+/// delete the row. Below that threshold this auto-discards (same atomic path as the
 /// "Discard" button) and tells the caller so, instead of offering a Recover
 /// that can't recover anything or silently failing the pipeline a few
 /// seconds later with a confusing "no speech" result.
@@ -1452,7 +1575,7 @@ pub async fn recover_interrupted_recording(
         .storage
         .set_pipeline_step(&conversation_id, PipelineStep::Finalizing, None)
         .await?;
-    emit_progress(&app, &conversation_id, "finalizing", "running", 0.05);
+    emit_progress(&app, &conversation_id, "finalizing", "running", None);
     state.metrics.track(
         crate::metrics::events::RECORDING_RECOVERED,
         crate::metrics::properties::EventProperties::new(),
@@ -1473,7 +1596,7 @@ pub async fn recover_interrupted_recording(
     })
 }
 
-/// W17b — the mid-*processing* counterpart to `list_interrupted_recordings`
+/// The mid-*processing* counterpart to `list_interrupted_recordings`
 /// above (12_CORNER_CASES.md "App crashes & recovery" §Mid-processing crash:
 /// "This conversation was still processing when Mnemos closed. Continue?").
 /// This half of the corner-cases spec was never built: a conversation
@@ -1516,8 +1639,8 @@ pub async fn discard_stuck_processing(
 /// /`system.wav` are already complete (capture finished normally; it was the
 /// *pipeline* that got cut off), so this just re-runs the same
 /// `run_post_recording_pipeline` a normal Stop uses, from the top. Simpler
-/// than resuming from the exact last-completed step (transcription is now
-/// fast — W17b's chunking fix — and idempotent to redo), and correct
+/// than resuming from the exact last-completed step (transcription is
+/// fast — thanks to chunking — and idempotent to redo), and correct
 /// regardless of whether the crash landed mid-transcription or
 /// mid-extraction.
 #[tauri::command]
@@ -1543,7 +1666,7 @@ pub async fn resume_stuck_processing(
         .storage
         .set_pipeline_step(&conversation_id, PipelineStep::Finalizing, None)
         .await?;
-    emit_progress(&app, &conversation_id, "finalizing", "running", 0.05);
+    emit_progress(&app, &conversation_id, "finalizing", "running", None);
     state.metrics.track(
         crate::metrics::events::STUCK_PROCESSING_RESUMED,
         crate::metrics::properties::EventProperties::new(),
@@ -1562,113 +1685,104 @@ pub async fn resume_stuck_processing(
     Ok(())
 }
 
-/// Menu-bar / tray red-dot indicator (LLD-11 §6). v1 slice: two icon states
-/// driven straight from the session registry (no `paused` state — Pause
-/// isn't built this wave), a static (non-pulsing) red dot, and a left-click
-/// that shows/focuses the main window. The full right-click menu (Pause /
-/// Resume / Stop… / recent conversations) and click-to-navigate are
-/// deferred — see this wave's LLD-11 Implementation status update.
-fn set_tray_recording(app: &AppHandle, recording: bool) {
-    let Some(tray) = app.tray_by_id("mnemos-recording") else {
-        return;
-    };
-    let icon = if recording {
-        tray_dot_icon([220, 38, 38, 255])
-    } else {
-        tray_dot_icon([120, 120, 120, 200])
-    };
-    let _ = tray.set_icon(Some(icon));
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::tray::TrayState;
 
-/// A tiny solid-color circle, generated at runtime so the tray icon needs no
-/// shipped asset. 22x22 RGBA (macOS menu-bar template size).
-fn tray_dot_icon(rgba: [u8; 4]) -> tauri::image::Image<'static> {
-    const SIZE: u32 = 22;
-    let mut bytes = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let center = SIZE as f32 / 2.0;
-    let radius = SIZE as f32 / 2.0 - 2.0;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 - center + 0.5;
-            let dy = y as f32 - center + 0.5;
-            let idx = ((y * SIZE + x) * 4) as usize;
-            if dx * dx + dy * dy <= radius * radius {
-                bytes[idx..idx + 4].copy_from_slice(&rgba);
-            }
+    /// Registers a synthetic session so the registry's derived state can be
+    /// tested without standing up capture. Only the fields `tray_snapshot`
+    /// reads carry meaning here.
+    fn insert_session(registry: &RecordingRegistry, session_id: u32, started_at_ms: i64) {
+        let (level_tx, _rx) = broadcast::channel(1);
+        registry.sessions.lock().unwrap().insert(
+            session_id,
+            ActiveSession {
+                conversation_id: format!("conv-{session_id}"),
+                project_id: None,
+                mic_path: PathBuf::from("mic.wav"),
+                system_path: PathBuf::from("system.wav"),
+                started_at_ms,
+                paused_at_ms: None,
+                transcript_forward_task: None,
+                warmup_forward_task: None,
+                level_tx,
+                level_forward_task: None,
+                #[cfg(target_os = "macos")]
+                sidecar: None,
+                capture_watch_task: None,
+            },
+        );
+    }
+
+    #[test]
+    fn no_session_reads_as_idle() {
+        let registry = RecordingRegistry::new();
+        assert_eq!(registry.tray_snapshot(), TrayState::Idle);
+        assert!(!registry.has_active_session());
+    }
+
+    #[test]
+    fn a_running_session_reports_elapsed_from_its_start() {
+        let registry = RecordingRegistry::new();
+        insert_session(&registry, 1, now_ms() - 5_000);
+
+        match registry.tray_snapshot() {
+            TrayState::Recording { elapsed_s } => assert!(
+                (4..=6).contains(&elapsed_s),
+                "expected ~5s elapsed, got {elapsed_s}"
+            ),
+            other => panic!("expected Recording, got {other:?}"),
         }
     }
-    tauri::image::Image::new_owned(bytes, SIZE, SIZE)
-}
 
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
+    /// The frontend's clock stops while paused, so the tray's has to stop at
+    /// the same reading — not keep counting, and not reset.
+    #[test]
+    fn pausing_freezes_the_elapsed_reading() {
+        let registry = RecordingRegistry::new();
+        insert_session(&registry, 1, now_ms() - 30_000);
+        assert!(registry.set_paused(1, true));
 
-/// Tray "Quit" — the only path that actually exits the process (Wave-9-Patch,
-/// LLD-11 §6). Shuts the worker down gracefully first
-/// (`WorkerSupervisor::shutdown`, which also stops any live sidecar per
-/// LLD-02 §8.2) so the warm Parakeet process this feature exists to keep
-/// alive across a window close doesn't end up orphaned on a real quit.
-fn quit(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        if let Err(err) = state.python.shutdown().await {
-            tracing::warn!(error = %err, "recording.tray_quit_shutdown_failed");
+        let first = match registry.tray_snapshot() {
+            TrayState::Paused { elapsed_s } => elapsed_s,
+            other => panic!("expected Paused, got {other:?}"),
+        };
+        assert!(
+            (29..=31).contains(&first),
+            "expected ~30s frozen, got {first}"
+        );
+
+        // Time passing must not move a paused reading.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        match registry.tray_snapshot() {
+            TrayState::Paused { elapsed_s } => assert_eq!(
+                elapsed_s, first,
+                "a paused reading must not advance with the clock"
+            ),
+            other => panic!("expected Paused, got {other:?}"),
         }
-        app.exit(0);
-    });
-}
-
-/// Builds the tray icon once at startup (idle/gray), and wires the
-/// hide-on-close lifecycle (Wave-9-Patch, LLD-11 §6): closing the main
-/// window hides it instead of quitting, so the already-warm worker started
-/// at launch stays alive in the background; only the tray's "Quit" item
-/// exits for real. Called from `lib.rs`'s `setup()`.
-pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{Menu, MenuItem};
-    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-
-    let show_item = MenuItem::with_id(app, "show", "Show Mnemos", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
-    TrayIconBuilder::with_id("mnemos-recording")
-        .icon(tray_dot_icon([120, 120, 120, 200]))
-        .tooltip("Mnemos")
-        .menu(&menu)
-        // Left click keeps its existing show/focus behavior (below);
-        // the menu opens on right click instead of hijacking left click.
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
-            "quit" => quit(app),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                show_main_window(tray.app_handle());
-            }
-        })
-        .build(app)?;
-
-    if let Some(window) = app.get_webview_window("main") {
-        let hide_target = window.clone();
-        window.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = hide_target.hide();
-            }
-        });
     }
 
-    Ok(())
+    #[test]
+    fn resuming_returns_to_a_running_clock() {
+        let registry = RecordingRegistry::new();
+        insert_session(&registry, 1, now_ms() - 10_000);
+        assert!(registry.set_paused(1, true));
+        assert!(registry.set_paused(1, false));
+
+        assert!(matches!(
+            registry.tray_snapshot(),
+            TrayState::Recording { .. }
+        ));
+    }
+
+    /// A stale session id must not panic — the same reasoning the registry is
+    /// keyed by id at all.
+    #[test]
+    fn pausing_an_unknown_session_is_a_clean_no_op() {
+        let registry = RecordingRegistry::new();
+        assert!(!registry.set_paused(99, true));
+        assert_eq!(registry.tray_snapshot(), TrayState::Idle);
+    }
 }

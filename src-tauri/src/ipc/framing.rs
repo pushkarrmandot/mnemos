@@ -1,6 +1,5 @@
-//! LSP-style `Content-Length` JSON-RPC 2.0 framing (LLD-02 §4.2,
-//! BACKEND_STANDARDS §2). Binary-safe UTF-8 framing on both directions of
-//! the worker's stdio pipe.
+//! LSP-style `Content-Length` JSON-RPC 2.0 framing. Binary-safe UTF-8
+//! framing on both directions of the worker's stdio pipe.
 //!
 //! Plain functions over `AsyncBufRead`/`AsyncWrite` so the same code frames
 //! real child-process pipes in production and in-memory buffers in tests.

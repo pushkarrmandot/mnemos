@@ -7,7 +7,7 @@ import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `idle -> arming -> recording` (LLD-11 §5). `arm()` flips the store to
+ * `idle -> arming -> recording`. `arm()` flips the store to
  * `arming` (and floats the pane) before the command even resolves — the
  * route mounts on `arming` too, so there's no flash of the empty dashboard
  * while the sidecar spawns.
@@ -20,20 +20,21 @@ export function useStartRecording() {
      * `projectId`, when passed (Project Detail's Record button, the top bar's
      * project picker), is applied at row creation by `start_recording` itself.
      * Omitting it starts an unfiled recording, which stays a first-class
-     * permanent state (W15: zero project gate at start).
+     * permanent state (zero project gate at start).
      */
     mutationFn: async (projectId?: string) => {
-      // W17c: arm with the *intended* project, not `null`. `arm()` resets to
-      // `SESSION_DEFAULTS`, so passing null here wiped the project before the
-      // recording screen ever rendered — `RecordingHeader`'s `ProjectChip`
-      // reads `projectId` straight off this store.
+      // Arm with the *intended* project, not `null`. `arm()` resets to
+      // `SESSION_DEFAULTS`, so passing null here would wipe the project
+      // before the recording screen ever rendered — `RecordingHeader`'s
+      // `ProjectChip` reads `projectId` straight off this store.
       useRecordingStore.getState().arm(projectId ?? null);
-      // The project is now set when the row is created, in one call. It used
-      // to be a follow-up `conversation_set_project` wrapped in a silent
-      // `catch` — so any failure produced a recording that was unfiled with
-      // no error surfaced, and `result.project_id` was always `null`. A
-      // failure here fails the whole mutation, which is correct: starting a
-      // recording into the wrong place is worse than not starting it.
+      // The project is set when the row is created, in one call, rather than
+      // via a follow-up `conversation_set_project` wrapped in a silent
+      // `catch` — that pattern would let any failure produce a recording
+      // that's unfiled with no error surfaced, and `result.project_id`
+      // would always read `null`. A failure here fails the whole mutation,
+      // which is correct: starting a recording into the wrong place is
+      // worse than not starting it.
       return commands.recording.start(projectId ?? null);
     },
     onSuccess: (result) => {
@@ -46,9 +47,9 @@ export function useStartRecording() {
       // actually recorded, so the chip can never claim a project the row
       // doesn't have.
       useRecordingStore.getState().setProjectId(result.project_id);
-      // Gap #3 (LLD-11 §5/§2): the new conversation must be visible in every
+      // The new conversation must be visible in every
       // list immediately, not only once the whole pipeline finishes. Both
-      // keys are `staleTime: Infinity` (LLD-10 §4.3), so nothing else would
+      // keys are `staleTime: Infinity`, so nothing else would
       // ever refetch them — an explicit invalidation here is the simplest
       // correct mechanism (no new backend event needed: this mutation is the
       // only place a fresh `conversations` row is created from the client's
@@ -72,8 +73,8 @@ export function useStartRecording() {
 }
 
 /**
- * Gap #2 (LLD-11 §5): "while `transcribing`, clicking Record shows a soft
- * confirmation... and calls `arm()`." Every Record entry point
+ * While `transcribing`, clicking Record shows a soft
+ * confirmation, and only calls `arm()` after it's accepted. Every Record entry point
  * (`TopBar`'s `RecordButton`, Dashboard/Recordings/Project-Detail empty
  * states) calls `.request()` instead of `.mutate()` directly — this is the
  * one place that decides whether to ask first.
@@ -98,7 +99,16 @@ export function useRequestStartRecording() {
   };
 }
 
-/** `recording -> paused`. Capture keeps running server-side; only the local timer/UI freeze. */
+/**
+ * `recording -> paused`. Capture genuinely stops: the macOS sidecar drops
+ * sample buffers while paused and the Windows worker suspends its capture,
+ * so a pause is a real hole in the recording, not a UI-only freeze.
+ *
+ * The elapsed clock stops with it (`useRecordingTick` skips the `paused`
+ * state) but is still measured from `startedAtMs`, so it jumps forward on
+ * resume by however long the pause lasted — the displayed time is wall-clock
+ * since Record, not time actually captured.
+ */
 export function usePauseRecording() {
   return useMutation({
     mutationFn: async (sessionId: number) => commands.recording.pause(sessionId),
@@ -138,7 +148,7 @@ export function useResumeRecording() {
 }
 
 /**
- * `recording|paused -> stopping`. Per LLD-11 §5's "Stop -> Detail transition
+ * `recording|paused -> stopping`. Per the "Stop -> Detail transition
  * guarantee": navigates optimistically in `onMutate`, before the Rust
  * command even returns, and rolls back to `/recording` on failure.
  */
@@ -160,7 +170,7 @@ export function useStopRecording() {
       }
     },
     onSuccess: (result) => {
-      // W17b: a recording under 5s (Stop clicked before any audio was ever
+      // A recording under 5s (Stop clicked before any audio was ever
       // flushed to disk) is deleted server-side rather than handed to a
       // pipeline that would crash on it — `onMutate` already navigated
       // optimistically to the now-deleted conversation, so back that out

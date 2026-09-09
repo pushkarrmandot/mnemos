@@ -1,11 +1,12 @@
 //! `WorkerSupervisor` — the Rust-side owner of the persistent Python
-//! `mnemos-worker` process lifetime (LLD-02 §3–§7). Spawns it, frames
+//! `mnemos-worker` process lifetime. Spawns it, frames
 //! JSON-RPC 2.0 over its stdio, health-checks it, restarts it with backoff,
 //! and replays `pending_jobs.json` / `current_job.json` across a crash.
 //!
-//! No Swift sidecar (W7) and no concrete reverse-RPC handler (the
-//! `run_agent_extraction` / `secrets.*` handlers are W8+ — see this wave's
-//! "Implementation status" in `lld/LLD_02_WORKER_SUPERVISOR.md` for why).
+//! No reverse-RPC handler ships built into this struct — `lib.rs::run`
+//! registers the real `run_agent_extraction` handler at startup via
+//! [`WorkerSupervisor::register_reverse_rpc`]; `secrets.*` has no handler
+//! yet.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -61,7 +62,7 @@ pub struct SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Production defaults (LLD-02 §5.1, §5.4, BACKEND §2). Callers still
+    /// Production defaults. Callers still
     /// must set `python_bin`, `cwd`, `state_dir`.
     pub fn new(python_bin: PathBuf, cwd: PathBuf, state_dir: PathBuf) -> Self {
         Self {
@@ -100,14 +101,14 @@ pub trait WorkerNotification: Serialize {
     const METHOD: &'static str;
 }
 
-/// `ping` — the one real job kind this wave's Python skeleton ships.
+/// `ping` — diagnostic/liveness job kind.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Ping {
     /// Test/diagnostic hook: makes the job run for `delay_ms` before
     /// replying, so a caller can simulate a slow/in-flight job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delay_ms: Option<u64>,
-    /// Idempotency key for job-queue replay (LLD-02 §6). Omitted, the
+    /// Idempotency key for job-queue replay. Omitted, the
     /// worker treats each `ping` as unique.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
@@ -167,13 +168,13 @@ impl WorkerNotification for Shutdown {
 }
 
 // ---------------------------------------------------------------------
-// Windows capture (LLD-03 §3.2, §4.2) — the mic+loopback WASAPI thread
+// Windows capture — the mic+loopback WASAPI thread
 // runs inside the persistent worker, off the job executor. macOS has no
 // use for these; capture there goes through `ipc::swift` instead.
 // ---------------------------------------------------------------------
 
 /// Topic name for the Windows capture thread's `capture_event`
-/// notifications (LLD-03 §3.2). Normalized into `capture::CaptureEvent` via
+/// notifications. Normalized into `capture::CaptureEvent` via
 /// `capture::capture_event_from_notification`.
 pub const CAPTURE_EVENT_TOPIC: &str = "capture_event";
 
@@ -236,17 +237,13 @@ impl WorkerRequest for ResumeCapture {
 }
 
 // ---------------------------------------------------------------------
-// Transcription (LLD-03 §3.2, §5, §6) — the worker's live-transcription
+// Transcription — the worker's live-transcription
 // poll thread and its `transcribe_final` post-processing pass. Mirrors the
-// capture section above: these are the RPC types + notification topic a
-// future `RecordingService` (W9) sends/subscribes through — no
-// `RecordingService`, no `recording.*` Tauri command, and no reader task
-// that forwards to a Tauri `Channel<TranscriptChunk>` exist yet (see this
-// wave's "Implementation status" in LLD-03 for the rationale, same
-// deviation W7a already took for `StartCapture`/`StopCapture`).
+// capture section above: these are the RPC types + notification topic
+// `commands::recording` sends/subscribes through.
 // ---------------------------------------------------------------------
 
-/// Topic name for `live_transcript_chunk` notifications (LLD-03 §5.2).
+/// Topic name for `live_transcript_chunk` notifications.
 /// Payload shape is `LiveTranscriptChunkNotification` below.
 pub const LIVE_TRANSCRIPT_CHUNK_TOPIC: &str = "live_transcript_chunk";
 
@@ -277,14 +274,14 @@ impl WorkerRequest for UnsubscribeLiveTranscript {
     const METHOD: &'static str = "unsubscribe_live_transcript";
 
     fn ttl(&self) -> Duration {
-        // Handler joins the live thread with its own 10s cap (LLD-03 §3.2)
+        // Handler joins the live thread with its own 10s cap
         // before replying — give the request registry enough room not to
         // time out first.
         Duration::from_secs(15)
     }
 }
 
-/// The `transcribe_final` post-processing pass (LLD-03 §3.2, §6.2): two
+/// The `transcribe_final` post-processing pass: two
 /// full-file Parakeet passes + merge, run through the worker's job queue
 /// (not the fast path above) since it can take up to ~30s.
 #[derive(Debug, Clone, Serialize)]
@@ -305,22 +302,39 @@ impl WorkerRequest for TranscribeFinal {
     type Response = TranscribeFinalResponse;
     const METHOD: &'static str = "transcribe_final";
 
+    /// This is a *silence* window, not a work budget.
+    ///
+    /// It used to be a flat 60s sized to "≤30s per inference pass", which
+    /// silently made recording length a ceiling: a 22-minute recording took
+    /// ~75s, was swept at 60s, and surfaced as "Processing failed during
+    /// transcribing" while the worker went on to finish successfully with
+    /// nothing listening. Scaling the constant by duration only moves that
+    /// cliff, and moves it differently on every machine — an 8 GB laptop and
+    /// an M3 Max are not within a small factor of each other.
+    ///
+    /// `transcribe_final` reports progress per chunk, and each report pushes
+    /// this deadline forward (see the `job_progress` branch in
+    /// `handle_incoming`). So this only has to cover the longest expected
+    /// gap *between* ticks, not the whole job: a slow machine simply reports
+    /// further apart and is never penalised, while a wedged or dead worker
+    /// still fails in bounded time because nothing arrives at all.
     fn ttl(&self) -> Duration {
-        // HLD NFR budget: post-batch holds `_infer_lock` ≤30s per pass;
-        // two passes plus queueing behind an in-flight live-tx drain tick
-        // gives this some margin (LLD-03 §7).
         Duration::from_secs(60)
     }
 }
 
 // ---------------------------------------------------------------------
-// Model download progress (W15 onboarding) — status poll + notification
+// Model download progress (onboarding) — status poll + notification
 // topic for the one v1-required model (Parakeet TDT 0.6B). No "start
 // download" request exists deliberately: `ParakeetModel.warm_up()` already
-// triggers the real download eagerly at worker boot (Wave-5-Patch), so
+// triggers the real download eagerly at worker boot, so
 // onboarding only ever observes it. See `models/transcription.py`'s
 // `MODEL_METHODS`/`_DownloadProgress` for the Python side.
 // ---------------------------------------------------------------------
+
+/// Topic name for `job_progress` notifications — long-running handlers
+/// reporting that they are still working. See `job_progress.py`.
+pub const JOB_PROGRESS_TOPIC: &str = "job_progress";
 
 /// Topic name for `model_download_progress` notifications.
 pub const MODEL_DOWNLOAD_PROGRESS_TOPIC: &str = "model_download_progress";
@@ -341,8 +355,8 @@ impl WorkerRequest for ModelDownloadStatus {
     const METHOD: &'static str = "model_download_status";
 }
 
-/// Payload of one `live_transcript_chunk` notification (LLD-03 §5.1's
-/// `_tick`). `conversation_id` disambiguates when more than one
+/// Payload of one `live_transcript_chunk` notification (`_tick`).
+/// `conversation_id` disambiguates when more than one
 /// conversation's live thread could theoretically be running (v1 asserts
 /// at most one).
 #[derive(Debug, Clone, Deserialize)]
@@ -359,7 +373,7 @@ pub struct LiveTranscriptChunkPayload {
     pub ts_end_ms: i64,
 }
 
-/// W17b: topic name for `live_transcription_warmup` notifications
+/// Topic name for `live_transcription_warmup` notifications
 /// (`live_transcription.py`'s `_notify_warmup_state_if_changed`). Fired once
 /// per readiness transition, not per poll tick — `ready: false` means live
 /// transcription is blocked on `ParakeetModel` warm-up.
@@ -372,23 +386,26 @@ pub struct LiveTranscriptionWarmupNotification {
 }
 
 // ---------------------------------------------------------------------
-// ---------------------------------------------------------------------
-// Memory system (LLD-05 §3.2, §4.2, §5.2) — the two forward jobs
+// Memory system — the two forward jobs
 // `extract_memory` / `refresh_project_memory`. Each job's handler makes
-// its own `run_agent_extraction` reverse-RPC call(s) (§7 below) to drive
+// its own `run_agent_extraction` reverse-RPC call(s) (below) to drive
 // the agent turn; what comes back here is the worker's already-validated,
-// already-schema-checked JSON (LLD-05 §4.3/§5.3) — this layer's only job is
+// already-schema-checked JSON — this layer's only job is
 // to persist it (`memory::extract_conversation` / `memory::refresh_project`).
 // ---------------------------------------------------------------------
 
-/// One `action_items[]` entry per LLD-05 §4.3. `assignee_contact_id` is
-/// accepted-but-dropped in v1 — contacts don't exist yet (this wave's brief:
-/// "pass an empty list; do not build contact lookup").
+/// One `action_items[]` entry. `assignee_contact_id` is
+/// accepted-but-dropped in v1 — contacts don't exist yet
+/// (pass an empty list; do not build contact lookup).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedActionItem {
     pub text: String,
     #[serde(default)]
     pub assignee_hint: Option<String>,
+    /// Set by the model instead of writing a "You" sentinel into
+    /// `assignee_hint` — see `db::models::ActionItemFilter::assigned_to_me`.
+    #[serde(default)]
+    pub assignee_is_self: bool,
     #[serde(default)]
     pub assignee_contact_id: Option<String>,
     #[serde(default)]
@@ -403,6 +420,8 @@ pub struct ExtractedDecision {
     #[serde(default)]
     pub decided_by_hint: Option<String>,
     #[serde(default)]
+    pub decided_by_is_self: bool,
+    #[serde(default)]
     pub quote: Option<String>,
     #[serde(default)]
     pub source_timestamp_ms: Option<i64>,
@@ -414,6 +433,8 @@ pub struct ExtractedOpenQuestion {
     #[serde(default)]
     pub raised_by_hint: Option<String>,
     #[serde(default)]
+    pub raised_by_is_self: bool,
+    #[serde(default)]
     pub source_timestamp_ms: Option<i64>,
 }
 
@@ -423,18 +444,20 @@ pub struct ExtractedBookmark {
     pub timestamp_ms: i64,
 }
 
-/// `extract_memory` (LLD-05 §3.2/§4.2) — forward job: Rust hands the worker
+/// `extract_memory` — forward job: Rust hands the worker
 /// the raw transcript + context, the worker's job handler is the one that
-/// actually calls `run_agent_extraction` (§7.2) and validates/retries the
+/// actually calls `run_agent_extraction` and validates/retries the
 /// schema; this request/response pair is just the forward-RPC envelope
 /// around that.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtractMemory {
     pub conversation_id: String,
-    /// Raw `transcript.json` contents (LLD-03 §6 shape — `turns[]` with
+    /// Raw `transcript.json` contents (`turns[]` with
     /// `speaker_label`/`text`/`ts_start_ms`/`ts_end_ms`).
     pub transcript: Value,
-    /// v1: always `[]` — contacts don't exist yet (this wave's brief).
+    /// v1's only entry is the user themselves — see
+    /// `memory::self_contact`. There is no `speakers`/`contacts` table
+    /// until v1.3 diarization.
     #[serde(default)]
     pub contacts: Vec<Value>,
     #[serde(default)]
@@ -444,6 +467,11 @@ pub struct ExtractMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractMemoryResponse {
+    /// A short, specific meeting title — auto-applied to a
+    /// conversation still carrying its `DEFAULT_CONVERSATION_TITLE`
+    /// placeholder, never overwriting a title the user (or a prior
+    /// extraction) already set. See `memory::extract_conversation`.
+    pub title: String,
     pub summary_markdown: String,
     #[serde(default)]
     pub action_items: Vec<ExtractedActionItem>,
@@ -460,15 +488,15 @@ impl WorkerRequest for ExtractMemory {
     const METHOD: &'static str = "extract_memory";
 
     fn ttl(&self) -> Duration {
-        // One `run_agent_extraction` turn (30s, §4.2) plus one schema-retry
-        // turn (§4.5) plus scheduling slack.
+        // One `run_agent_extraction` turn (30s) plus one schema-retry
+        // turn plus scheduling slack.
         Duration::from_secs(75)
     }
 }
 
-/// `refresh_project_memory` (LLD-05 §3.2/§5.2). `current_memory: None` is
-/// the `# NEW PROJECT` sentinel (§5.2/§6.2). The worker computes the diff
-/// guardrail (§5.4) itself — `difflib.SequenceMatcher` has no Rust-side
+/// `refresh_project_memory`. `current_memory: None` is
+/// the `# NEW PROJECT` sentinel. The worker computes the diff
+/// guardrail itself — `difflib.SequenceMatcher` has no Rust-side
 /// equivalent worth adding for one bool.
 #[derive(Debug, Clone, Serialize)]
 pub struct RefreshProjectMemory {
@@ -536,9 +564,12 @@ struct JsonRpcErrorObj {
 
 struct PendingEntry {
     tx: oneshot::Sender<Result<Value, JsonRpcErrorObj>>,
-    #[allow(dead_code)]
-    method: &'static str,
     deadline: Instant,
+    /// The request's own silence window, kept so a `job_progress` tick can
+    /// re-arm `deadline` by the same amount the request originally asked
+    /// for — a global constant would apply one request's tolerance to
+    /// every other kind.
+    ttl: Duration,
 }
 
 struct TransportHandle {
@@ -566,7 +597,7 @@ pub struct WorkerSupervisor {
     notify_topics: StdMutex<HashMap<String, broadcast::Sender<Value>>>,
     last_heartbeat: StdMutex<Instant>,
     restart_state: StdMutex<RestartState>,
-    /// At most one live sidecar in v1 (LLD-02 §8.2). `shutdown()` walks
+    /// At most one live sidecar in v1. `shutdown()` walks
     /// this to stop it before killing the worker.
     #[cfg(target_os = "macos")]
     live_sidecar: StdMutex<Option<crate::ipc::swift::SidecarControl>>,
@@ -577,9 +608,8 @@ impl WorkerSupervisor {
     /// dead worker is represented as a permanently-unavailable internal
     /// state (surfaced by every `send()` as `WorkerUnavailable`) rather than
     /// a hard error here, so app boot never depends on the worker being
-    /// reachable (LLD-02 §5.5's "permanent" classification, applied at the
-    /// `send()` boundary instead of at `spawn()` — see this wave's
-    /// "Implementation status" for the rationale).
+    /// reachable — the "permanent" classification is applied at the
+    /// `send()` boundary instead of at `spawn()`.
     pub async fn spawn(cfg: SupervisorConfig) -> Result<Arc<Self>, AppError> {
         let sup = Arc::new(Self {
             cfg,
@@ -617,9 +647,9 @@ impl WorkerSupervisor {
         Ok(sup)
     }
 
-    /// Register a reverse-RPC handler. Built-in handlers (`secrets.*`,
-    /// `run_agent_extraction`) are NOT registered by this wave — see the
-    /// module doc comment. Tests use this to inject fakes.
+    /// Register a reverse-RPC handler. No handlers ship built into this
+    /// struct — see the module doc comment for who registers what. Tests
+    /// use this to inject fakes.
     pub fn register_reverse_rpc(&self, method: &'static str, handler: Arc<dyn ReverseRpcHandler>) {
         self.reverse_handlers
             .lock()
@@ -627,7 +657,7 @@ impl WorkerSupervisor {
             .insert(method, handler);
     }
 
-    /// Onboarding's permission-preflight commands (W15) spawn the sidecar
+    /// Onboarding's permission-preflight commands spawn the sidecar
     /// binary directly, one-shot, outside the persistent-session protocol
     /// this struct otherwise owns — this just exposes the same path
     /// `spawn_sidecar` already resolves, so there's one source of truth for
@@ -670,8 +700,8 @@ impl WorkerSupervisor {
             .map_err(|_| self.unavailable_error())
     }
 
-    /// Spawn a Swift sidecar for one recording session (LLD-02 §8, LLD-03
-    /// §4.1). Sidecar state is disjoint from the Python worker's — this
+    /// Spawn a Swift sidecar for one recording session.
+    /// Sidecar state is disjoint from the Python worker's — this
     /// call does not touch `self.transport`/`self.registry` at all.
     #[cfg(target_os = "macos")]
     pub async fn spawn_sidecar(
@@ -751,8 +781,8 @@ impl WorkerSupervisor {
                 id,
                 PendingEntry {
                     tx,
-                    method,
                     deadline: Instant::now() + ttl,
+                    ttl,
                 },
             );
         }
@@ -776,7 +806,7 @@ impl WorkerSupervisor {
     }
 
     /// Spawns the child, handshakes, starts the reader/writer/stderr/health
-    /// tasks, and replays job-queue state files (LLD-02 §4.1, §6).
+    /// tasks, and replays job-queue state files.
     async fn establish_connection(self: &Arc<Self>) -> Result<(), EstablishOutcome> {
         adopt_or_kill_stale_manifest(&self.cfg).await;
 
@@ -827,7 +857,7 @@ impl WorkerSupervisor {
                 command.env(var, v);
             }
         }
-        crate::procutil::suppress_console_window(&mut command);
+        crate::procutil::suppress_console_window_tokio(&mut command);
 
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -935,7 +965,7 @@ impl WorkerSupervisor {
         Ok(())
     }
 
-    /// LLD-02 §6: reads `current_job.json` then `pending_jobs.json` and
+    /// Reads `current_job.json` then `pending_jobs.json` and
     /// re-issues each as a fresh request. Nothing awaits the replies here —
     /// idempotency (owned by the job executor) makes a discarded late reply
     /// safe, and there is no original caller left to notify after a
@@ -1006,7 +1036,7 @@ impl WorkerSupervisor {
                     let mut rs = self.restart_state.lock().unwrap();
                     // Backoff itself resets only after `restart_stable_after`
                     // of uptime (stable_reset_task); a fresh connection does
-                    // not immediately clear it, matching LLD-02 §5.4.
+                    // not immediately clear it.
                     let _ = &mut rs;
                     return;
                 }
@@ -1062,15 +1092,17 @@ impl EstablishOutcome {
 }
 
 fn map_json_rpc_error(err: JsonRpcErrorObj) -> AppError {
-    // Codes per LLD-02 §4.4 / BACKEND §2.
+    // Worker-defined JSON-RPC error codes.
     match err.code {
         -32001 => AppError::WorkerUnavailable { retry_after_ms: 0 },
-        -32020 => AppError::Cancelled,
+        -32020 => AppError::Cancelled {
+            message: err.message,
+        },
         -32010 => AppError::Validation {
             message: err.message,
             field: None,
         },
-        // LLD-05 §4.5 — the worker's `extract_memory`/`refresh_project_memory`
+        // The worker's `extract_memory`/`refresh_project_memory`
         // handlers raise this (via `WorkerJobError`) after the agent's JSON
         // still fails schema validation on the one allowed retry.
         -32022 => AppError::Runner {
@@ -1200,6 +1232,32 @@ async fn dispatch_incoming(sup: &Arc<WorkerSupervisor>, msg: Value) {
                 *sup.last_heartbeat.lock().unwrap() = Instant::now();
                 return;
             }
+            // A progress tick from a long-running handler pushes that
+            // request's deadline forward, which is what lets the TTL bound
+            // *silence* instead of total work (see `TranscribeFinal::ttl`
+            // and `job_progress.py`, which reports per inference chunk).
+            // Without this the Python half emits ticks nobody acts on, and
+            // any job outrunning its flat TTL is swept mid-flight even
+            // though it is visibly making progress — which is exactly how a
+            // 22-minute recording failed while the worker was still working
+            // on it.
+            //
+            // Still forwarded to topic subscribers below: extending the
+            // deadline is an additional effect, not a replacement, so a UI
+            // progress bar on the same notification keeps working.
+            if method == JOB_PROGRESS_TOPIC {
+                if let Some(request_id) = msg
+                    .get("params")
+                    .and_then(|p| p.get("request_id"))
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| id.parse::<u64>().ok())
+                {
+                    let mut reg = sup.registry.lock().unwrap();
+                    if let Some(entry) = reg.get_mut(&request_id) {
+                        entry.deadline = Instant::now() + entry.ttl;
+                    }
+                }
+            }
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let topics = sup.notify_topics.lock().unwrap();
             if let Some(tx) = topics.get(&method) {
@@ -1231,8 +1289,7 @@ fn dispatch_reverse_rpc(
             None => JsonRpcResponseOut::error(id.clone(), -32601, "method not found".to_string()),
             Some(h) => {
                 // `tokio::spawn` isolates a handler panic into a `JoinError`
-                // instead of taking the reader task down with it — the same
-                // guarantee LLD-02 §7.1 asks `catch_unwind` for.
+                // instead of taking the reader task down with it.
                 let task = tokio::spawn(async move { h.handle(params).await });
                 match task.await {
                     Ok(Ok(value)) => JsonRpcResponseOut::result(id.clone(), value),
@@ -1508,6 +1565,20 @@ fn move_aside(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The deadline must not be derived from recording length — that was
+    /// the failed approach this replaced. It bounds silence between progress
+    /// ticks, so it is deliberately the same for a 2-minute and a 3-hour
+    /// recording; `job_progress` reports are what keep a long job alive.
+    #[test]
+    fn transcribe_final_ttl_is_a_fixed_silence_window() {
+        let req = || TranscribeFinal {
+            conversation_id: "c".into(),
+            mic_path: PathBuf::from("/tmp/m.wav"),
+            system_path: PathBuf::from("/tmp/s.wav"),
+        };
+        assert_eq!(req().ttl(), Duration::from_secs(60));
+    }
     use super::*;
 
     fn bare_supervisor() -> Arc<WorkerSupervisor> {
@@ -1614,11 +1685,11 @@ mod tests {
 
     #[tokio::test]
     async fn live_transcript_chunk_notification_round_trips_through_subscribe() {
-        // Exercises the path a future RecordingService reader task (W9)
-        // will use: `sup.subscribe(LIVE_TRANSCRIPT_CHUNK_TOPIC)` then parse
+        // Exercises the path `commands::recording`'s reader task uses:
+        // `sup.subscribe(LIVE_TRANSCRIPT_CHUNK_TOPIC)` then parse
         // each `Value` into `LiveTranscriptChunkNotification` — proves the
-        // wire shape this wave's Python `live_transcript_chunk` notifier
-        // emits (LLD-03 §5.1's `_tick`) is exactly what Rust expects.
+        // wire shape the Python `live_transcript_chunk` notifier
+        // emits (`_tick`) is exactly what Rust expects.
         let sup = bare_supervisor();
         let mut rx = sup.subscribe(LIVE_TRANSCRIPT_CHUNK_TOPIC);
 
@@ -1709,6 +1780,40 @@ mod tests {
         assert!(rs.failures.len() >= sup.cfg.restart_budget_max_failures);
     }
 
+    /// The half that was missing: Python reported progress and Rust ignored
+    /// it, so any job outrunning its flat TTL was swept while visibly still
+    /// working. A tick must re-arm the deadline by the request's own window.
+    #[tokio::test]
+    async fn job_progress_tick_extends_the_request_deadline() {
+        let sup = bare_supervisor();
+        let (tx, _rx) = oneshot::channel();
+        let about_to_expire = Instant::now() + Duration::from_millis(10);
+        sup.registry.lock().unwrap().insert(
+            7,
+            PendingEntry {
+                tx,
+                deadline: about_to_expire,
+                ttl: Duration::from_secs(60),
+            },
+        );
+
+        dispatch_incoming(
+            &sup,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": JOB_PROGRESS_TOPIC,
+                "params": { "request_id": "7", "kind": "transcribe", "fraction": 0.4 }
+            }),
+        )
+        .await;
+
+        let extended = sup.registry.lock().unwrap().get(&7).unwrap().deadline;
+        assert!(
+            extended > about_to_expire + Duration::from_secs(30),
+            "a progress tick must push the deadline out by the request's ttl"
+        );
+    }
+
     #[tokio::test]
     async fn ttl_sweep_fails_an_expired_registry_entry() {
         let sup = bare_supervisor();
@@ -1717,8 +1822,8 @@ mod tests {
             42,
             PendingEntry {
                 tx,
-                method: "ping",
                 deadline: Instant::now() - Duration::from_millis(1),
+                ttl: Duration::from_secs(30),
             },
         );
 

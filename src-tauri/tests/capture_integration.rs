@@ -1,9 +1,9 @@
-//! macOS-only integration tests for the `mnemos-audio` Swift sidecar (LLD-03
-//! §4.1, LLD-02 §8) — spawns the real compiled binary (`swift build -c
+//! macOS-only integration tests for the `mnemos-audio` Swift sidecar —
+//! spawns the real compiled binary (`swift build -c
 //! release` in `swift/mnemos-audio/`, not a stub) and drives it through
 //! `WorkerSupervisor::spawn_sidecar`.
 //!
-//! Covers this wave's DoD: a real recording produces two playable 16kHz
+//! Covers the definition of done: a real recording produces two playable 16kHz
 //! mono WAVs, and killing the sidecar mid-recording is detected as an
 //! `Exited` event rather than a hang or a panic.
 
@@ -30,7 +30,7 @@ fn sidecar_bin() -> PathBuf {
 }
 
 /// Builds a supervisor whose Python side never has to actually come up —
-/// these tests only exercise `spawn_sidecar`, which LLD-02 §8 documents as
+/// these tests only exercise `spawn_sidecar`, which is
 /// disjoint state from the Python worker transport.
 async fn supervisor(state_dir: PathBuf) -> std::sync::Arc<WorkerSupervisor> {
     let mut cfg = SupervisorConfig::new(python_bin(), src_python_dir(), state_dir);

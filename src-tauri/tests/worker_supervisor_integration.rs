@@ -1,6 +1,6 @@
-//! Integration tests for `WorkerSupervisor` (LLD-02 §11) — spawns the real
-//! `python -m mnemos_worker` process (not a stub) since this wave's Python
-//! skeleton already speaks the full protocol (handshake/ping/health_check/
+//! Integration tests for `WorkerSupervisor` — spawns the real
+//! `python -m mnemos_worker` process (not a stub) since the Python
+//! side already speaks the full protocol (handshake/ping/health_check/
 //! shutdown + job-queue park/replay). Backoff/health/TTL timings are
 //! shortened via `SupervisorConfig` so the suite runs in well under a
 //! minute.
@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use mnemos_tauri_lib::ipc::python::{HealthCheck, Ping, SupervisorConfig, WorkerSupervisor};
+use mnemos_tauri_lib::commands::models::list_transcription_models;
+use mnemos_tauri_lib::ipc::python::{
+    HealthCheck, ModelDownloadStatus, Ping, SupervisorConfig, WorkerSupervisor,
+};
 
 fn python_bin() -> PathBuf {
     PathBuf::from(if cfg!(windows) { "python" } else { "python3" })
@@ -97,8 +100,7 @@ async fn kill_mid_request_fails_pending_then_restarts_and_replays() {
     });
 
     // Wait for the worker to actually start executing the job (visible on
-    // disk), then kill -9 the OS process directly — the same failure mode
-    // as LLD-02 §11's "kill -9 the stub from within the test".
+    // disk), then kill -9 the OS process directly — a hard crash mid-job.
     let current_job_path = state_dir.join("current_job.json");
     assert!(
         wait_until(Duration::from_secs(3), Duration::from_millis(20), || {
@@ -146,6 +148,41 @@ async fn kill_mid_request_fails_pending_then_restarts_and_replays() {
         .await
         .expect("worker must be usable again after restart");
     assert!(reply.pong);
+
+    sup.shutdown().await.expect("graceful shutdown");
+}
+
+/// The registry in `commands::models` (Rust) and `PARAKEET_MODEL_ID`
+/// (`src-python/mnemos_worker/models/transcription.py`) are two constants in
+/// two processes describing the same real model — they can't be a single
+/// shared value across the language boundary, so nothing stops them from
+/// silently drifting apart except a test that asks the real running worker
+/// what its model id actually is. `ModelDownloadStatus` is a synchronous,
+/// no-network status read (`_DownloadProgress.snapshot()`) — it never
+/// triggers the real ~600MB download, so this is safe and fast to run on
+/// every `cargo test`, unlike the model itself ever being exercised for
+/// real (that's what the `MNEMOS_LIVE_RECORDING`-gated tests are for).
+#[tokio::test]
+async fn worker_reported_model_id_matches_the_rust_side_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sup = WorkerSupervisor::spawn(fast_config(tmp.path().to_path_buf()))
+        .await
+        .expect("spawn always returns Ok");
+
+    let status = sup
+        .send(ModelDownloadStatus {})
+        .await
+        .expect("model_download_status should succeed");
+
+    let known_ids: Vec<String> = list_transcription_models()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert!(
+        known_ids.contains(&status.model_id),
+        "worker reported model id {:?}, not one of the Rust-side registry's ids {known_ids:?}",
+        status.model_id,
+    );
 
     sup.shutdown().await.expect("graceful shutdown");
 }

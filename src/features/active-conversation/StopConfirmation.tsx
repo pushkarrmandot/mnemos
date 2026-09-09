@@ -5,8 +5,8 @@ import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<StopConfirmation>` (LLD-11 §3.1). Escape closes the modal without
- * stopping the recording — the mishap-safe default the LLD calls for.
+ * `<StopConfirmation>`. Escape closes the modal without
+ * stopping the recording — the mishap-safe default.
  */
 export function StopConfirmation() {
   const open = useUIStore((s) => s.modal === "stop-confirmation");

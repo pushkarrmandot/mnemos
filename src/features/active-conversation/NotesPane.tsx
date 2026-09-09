@@ -3,14 +3,12 @@ import { RECORDING_NOTES_ATTR } from "@/components/app/shell/useKeyboard";
 import { useRecordingStore } from "@/stores/recording";
 
 /**
- * `<NotesPane>` (LLD-11 §3.1) — local draft only this wave. No backend
- * persistence: `commands.conversation.write_notes` doesn't exist yet (not
- * built by any prior wave, and the brief doesn't require it — "local draft,
- * no backend persistence required this wave unless trivial"). The draft
- * still survives a stray unmount because it lives in `useRecordingStore`,
- * not component state.
+ * `<NotesPane>` — local draft only for now. No backend
+ * persistence: `commands.conversation.write_notes` doesn't exist yet. The
+ * draft still survives a stray unmount because it lives in
+ * `useRecordingStore`, not component state.
  *
- * `React.memo` boundary per LLD-11 §3.1: `LiveTranscriptStream` re-renders
+ * `React.memo` boundary: `LiveTranscriptStream` re-renders
  * on every streamed turn; this subtree reads a disjoint store slice
  * (`notesDraft`) so it never re-renders alongside it.
  */

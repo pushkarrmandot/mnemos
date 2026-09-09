@@ -10,11 +10,11 @@ import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<ControlBar>` (LLD-11 §3.1): level meter + Pause/Resume + Stop +
- * Bookmark. `<MinimizeToFloatingButton>` (the floating pane, §7) stays out
+ * `<ControlBar>`: level meter + Pause/Resume + Stop +
+ * Bookmark. `<MinimizeToFloatingButton>` (the floating pane) stays out
  * of scope.
  *
- * Debug-session patch — the "soft pill" direction from the design pass:
+ * The "soft pill" direction from the design pass:
  * an inset, more-rounded (`--radius-xl`) card instead of a flush
  * edge-to-edge bar, with pill-shaped (`rounded-full`) controls. The
  * horizontal padding (`px-5` = 20px) is deliberately larger than

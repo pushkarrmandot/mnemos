@@ -4,7 +4,7 @@ import { useStartRecording } from "@/features/active-conversation/useRecordingMu
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<StartRecordingConfirmation>` (LLD-11 §5, gap #2). Shown when the user
+ * `<StartRecordingConfirmation>`. Shown when the user
  * clicks Record while the *previous* conversation is still `transcribing`
  * (post-stop pipeline still running in the background). Mirrors
  * `<StopConfirmation>`'s pattern: single-slot modal, opened via

@@ -1,13 +1,14 @@
 //! macOS-only: spawns and controls the `mnemos-audio` Swift sidecar for one
-//! recording session (LLD-02 §8, BACKEND §3). Sidecar state is disjoint
+//! recording session. Sidecar state is disjoint
 //! from the Python worker's — this module knows nothing about JSON-RPC
 //! framing or the worker's registry, only the sidecar's ~9-message
-//! line-delimited JSON protocol (LLD-03 §3.3).
+//! line-delimited JSON protocol.
 //!
 //! `SidecarEvent::Ready` is consumed during the spawn handshake and never
 //! forwarded; every event after that is normalized into `capture::CaptureEvent`
-//! so `RecordingService`'s reader (a later wave) never special-cases which
-//! platform produced it (LLD-03 §4.3's cross-platform vocabulary rule).
+//! so `commands::recording`'s reader never special-cases which
+//! platform produced it (see `capture::CaptureEvent`'s cross-platform
+//! vocabulary).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -51,8 +52,8 @@ impl SidecarControl {
     }
 
     /// Sends `stop`, waits (bounded) for the caller to observe `Stopped` on
-    /// the event channel, then guarantees the process is gone — LLD-02
-    /// §8.2 "Kill on stop": SIGTERM/kill_on_drop backstop if the sidecar
+    /// the event channel, then guarantees the process is gone —
+    /// SIGTERM/kill_on_drop backstop if the sidecar
     /// ignores the request. This method only sends the command; the caller
     /// is expected to have already seen (or given up waiting for)
     /// `CaptureEvent::Stopped` on `events` before calling it, then calls
@@ -62,7 +63,7 @@ impl SidecarControl {
     }
 
     /// Hard-kill backstop, used when `Stopped` doesn't arrive within the
-    /// 2s timeout LLD-02 §8.2 specifies.
+    /// 2s timeout.
     pub async fn force_kill(&self) {
         let mut child = self.child.lock().await;
         let _ = child.start_kill();
@@ -81,11 +82,23 @@ impl SidecarControl {
     }
 }
 
-/// LLD-02 §8.1 spawn sequence: launch, await `Ready` (2s timeout), send
+/// Spawn sequence: launch, await `Ready` (2s timeout), send
 /// `start`, await `Started` — folded into `CaptureEvent::Started` on the
 /// returned handle's channel by the time this returns.
 pub async fn spawn(sidecar_bin: &Path, cfg: SidecarConfig) -> Result<SidecarHandle, AppError> {
     let mut command = Command::new(sidecar_bin);
+    // Never leave a child on the inherited cwd. A Finder-launched `.app`
+    // inherits `launchd`'s `/`, which makes any path-relative work a
+    // subprocess does land on the filesystem root — and on macOS, walking
+    // out of `/` into the user's home is what trips TCC consent prompts
+    // for Documents/Desktop/iCloud. This sidecar only ever writes absolute
+    // paths, so this is defence in depth rather than a fix for an observed
+    // bug, but the cost is one line.
+    if let Ok(root) = crate::fs::paths::data_root() {
+        if root.is_dir() {
+            command.current_dir(root);
+        }
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -199,9 +212,9 @@ async fn stdout_reader_task(
                 }
             }
             Ok(None) => {
-                // Sidecar closed stdout without a Stopped event — LLD-03
-                // §3.3: "exited — never actually sent; the sidecar process
-                // just closes stdout."
+                // Sidecar closed stdout without a Stopped event: "exited" is
+                // never actually sent; the sidecar process just closes
+                // stdout.
                 let _ = tx
                     .send(CaptureEvent::Exited {
                         code: None,
@@ -231,7 +244,7 @@ async fn stderr_forward_task(stderr: tokio::process::ChildStderr) {
     }
 }
 
-/// Parses one line of sidecar stdout (LLD-03 §3.3) into the cross-platform
+/// Parses one line of sidecar stdout into the cross-platform
 /// `CaptureEvent`. `ready` is not representable here — it is only ever
 /// consumed inline during `spawn()`. An unrecognized/malformed line is
 /// dropped (logged), matching the worker's own "malformed line" tolerance.
@@ -272,6 +285,30 @@ fn parse_sidecar_line(line: &str) -> Option<CaptureEvent> {
                 .unwrap_or_default()
                 .to_string(),
         }),
+        // Which system-audio backend actually ran, and — when the Core Audio
+        // tap came up but produced nothing — why we abandoned it. Not a
+        // `CaptureEvent`: nothing downstream branches on the backend, but
+        // "which path did this recording take" is the first question asked
+        // whenever system audio comes back silent, and without this the
+        // answer isn't recoverable after the fact.
+        "system_audio_backend" => {
+            tracing::info!(
+                backend = v
+                    .get("backend")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown"),
+                fell_back_from = v
+                    .get("fell_back_from")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                reason = v
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                "capture.system_audio_backend"
+            );
+            None
+        }
         _ => {
             tracing::warn!(event, "sidecar.stdout.unknown_event");
             None
@@ -279,7 +316,7 @@ fn parse_sidecar_line(line: &str) -> Option<CaptureEvent> {
     }
 }
 
-/// Onboarding permission preflight (W15) — a one-shot invocation of the
+/// Onboarding permission preflight — a one-shot invocation of the
 /// sidecar binary with `argv[1]` set to one of `check-permissions` /
 /// `request-mic-permission` / `request-screen-permission`, distinct from
 /// `spawn()`'s persistent per-recording session above. Reads exactly one
