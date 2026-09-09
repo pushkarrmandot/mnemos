@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "TODO: add GitHub repository URL here"
+  },
   "packageManager": "pnpm@10.28.1",
   "scripts": {
     "dev": "tauri dev",
@@ -22,6 +27,8 @@
     "@tanstack/react-router": "^1.170.31",
     "@tanstack/react-virtual": "^3.14.10",
     "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-process": "^2.3.0",
+    "@tauri-apps/plugin-updater": "^2.9.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",

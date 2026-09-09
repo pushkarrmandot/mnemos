@@ -5,6 +5,9 @@ description = "Mnemos — local-first meeting memory"
 edition = "2021"
 rust-version = "1.80"
 publish = false
+license = "AGPL-3.0-or-later"
+authors = ["pushkarmandot@gmail.com"]
+repository = "https://github.com/pushkarmandot/mnemos"
 # W16 added a second `[[bin]]` (`mnemos-mcp-server`) to this package, so
 # `cargo run` can no longer infer which binary to launch — including the
 # implicit `cargo run` the Tauri CLI shells out to on `pnpm tauri dev`.
@@ -25,14 +28,25 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # own module docs for why this differs from LLD-08 §5.2's "shared
 # `mnemos-storage` crate" sketch.
 [[bin]]
-name = "mnemos-mcp-server"
-path = "src/bin/mnemos_mcp_server/main.rs"
+# Underscored to match the PDB/debug-info filename rustc derives from the
+# crate name (hyphens aren't valid in Rust identifiers, so rustc always
+# substitutes underscores there) — with a hyphenated bin name the .exe and
+# .pdb disagreed, and the Tauri NSIS bundler resolves this binary's bundle
+# entry by the underscored name, so a real `pnpm tauri build --bundles nsis`
+# failed with "when getting size of ...mnemos_mcp_server.exe: The system
+# cannot find the file specified" (it built mnemos-mcp-server.exe, hyphenated,
+# and went looking for the underscored name). See mcp_shared.rs, which now
+# looks for this same underscored name at runtime.
+name = "mnemos_mcp_server"
+path = "src/bin/mnemos-mcp-server/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `image-png` is what makes `Image::from_bytes` exist — the tray icons are
+# PNGs compiled in via `include_bytes!` (see `commands::tray`).
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
 
 serde = { version = "1", features = ["derive"] }
@@ -57,6 +71,8 @@ tokio-stream = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
 tauri-plugin-window-state = "2.4.1"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 # Product analytics transport (`metrics` module) — the only network client
 # in the codebase; rustls-only so the Tauri bundler never needs a system
 # OpenSSL toolchain.
