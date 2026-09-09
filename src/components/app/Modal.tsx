@@ -11,17 +11,15 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 
 /**
- * SHELL_CHEATSHEET.md §5 + DESIGN_SYSTEM.md §21 (Dialog override row).
- *
  * Strips shadcn's `shadow-lg`, `rounded-lg` border and zoom-in animation and
  * replaces them with `radius-lg`, a blurred `rgba(0,0,0,0.4)` scrim, no shadow,
  * and a `motion-tuck` enter. Feature code imports this, never
- * `@/components/ui/dialog` (FRONTEND_STANDARDS §4).
+ * `@/components/ui/dialog`.
  *
  * Dirty guard: a modal body calls `useDirtyGuard()(true)` once its form has
  * unsaved input. Overlay clicks then swap to a confirm-discard step instead of
- * throwing the draft away. Esc still closes unconditionally — §9's checklist
- * asks for one predictable escape hatch, and losing an empty placeholder form
+ * throwing the draft away. Esc still closes unconditionally, for one
+ * predictable escape hatch — losing an empty placeholder form
  * is cheaper than a modal the user can't get out of.
  */
 type DirtySetter = (dirty: boolean) => void;
@@ -87,7 +85,7 @@ export function Modal({
           className,
         )}
         onEscapeKeyDown={() => close()}
-        // §5 — a dirty form gets a confirm step instead of a silent discard.
+        // A dirty form gets a confirm step instead of a silent discard.
         onInteractOutside={(event) => {
           if (!dirty) return;
           event.preventDefault();

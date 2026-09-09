@@ -3,7 +3,7 @@ import { Illustration, type IllustrationSlot } from "@/components/app/Illustrati
 import { cn } from "@/lib/cn";
 
 /**
- * DESIGN_SYSTEM.md §18 — illustration, then heading, then optional body, then
+ * Illustration, then heading, then optional body, then
  * at most one CTA. Top-anchored in the top third; never dead-centered.
  *
  * Copy is BRAND voice: warm, states the fact, no "!", no "Oops".

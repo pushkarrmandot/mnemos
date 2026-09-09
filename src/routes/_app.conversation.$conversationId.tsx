@@ -7,11 +7,13 @@ import {
   MessagesSquare,
   NotebookPen,
   NotebookText,
+  X,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/app/Button";
 import { EmptyState } from "@/components/app/EmptyState";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { LiveTranscriptList } from "@/features/active-conversation/LiveTranscriptList";
 import { CopyButton } from "@/features/conversation-detail/CopyButton";
 import { DetailHeader } from "@/features/conversation-detail/DetailHeader";
 import { deriveDisplayState } from "@/features/conversation-detail/deriveDisplayState";
@@ -21,21 +23,30 @@ import {
   OpenQuestionsSection,
 } from "@/features/conversation-detail/ExtractionLists";
 import { READING_MAX_W } from "@/features/conversation-detail/layout";
-import { MarkdownView } from "@/features/conversation-detail/markdown";
 import { NotesTab } from "@/features/conversation-detail/NotesTab";
 import { ProcessingOverlay } from "@/features/conversation-detail/ProcessingOverlay";
-import {
-  useConversationDetail,
-  useConversationPipelineProgress,
-} from "@/features/conversation-detail/queries";
+import { useConversationDetail } from "@/features/conversation-detail/queries";
 import { Section } from "@/features/conversation-detail/Section";
+import { SummarySection } from "@/features/conversation-detail/SummarySection";
 import { TranscriptPane } from "@/features/conversation-detail/TranscriptPane";
+import {
+  useDeleteExtractionItem,
+  useSetExtractionText,
+} from "@/features/conversation-detail/useExtractionItemMutations";
 import { useRegenerateSummary } from "@/features/conversation-detail/useRegenerateSummary";
 import { useSetOpenQuestionOwner } from "@/features/conversation-detail/useSetOpenQuestionOwner";
+import { useSetOpenQuestionResolved } from "@/features/conversation-detail/useSetOpenQuestionResolved";
+import type { ExtractionKind } from "@/ipc";
+import { formatMmSs } from "@/lib/time";
+import { useConversationPipelineProgress } from "@/stores/conversationPipeline";
 import { ACTIVE_CAPTURE_STATES, useRecordingStore } from "@/stores/recording";
 import { useSelectionStore } from "@/stores/selection";
 
-/** `/conversation/$conversationId` — recording or post-processed (LLD-11 §3.2). */
+/**
+ * `/conversation/$conversationId` — recording or post-processed: the route
+ * renders differently depending on whether this conversation is still
+ * capturing/processing versus finished.
+ */
 export const Route = createFileRoute("/_app/conversation/$conversationId")({
   component: ConversationRoute,
 });
@@ -53,14 +64,6 @@ function WaitingRow({ label }: { label: string }) {
   );
 }
 
-/** `mm:ss` — matches `TranscriptPane`/`LiveTranscriptStream`'s formatting. */
-function formatTs(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
-
 /**
  * The just-recorded live transcript, shown in the Transcript tab while the
  * final merged `transcript.json` is still being written — better than a
@@ -74,27 +77,10 @@ function LiveTranscriptPreview() {
     return <WaitingRow label="Transcribing…" />;
   }
   return (
-    <div>
-      <p className="type-caption mb-2 text-tertiary">
-        Live preview — speakers are separated when the full transcript finishes.
-      </p>
-      <div className={`${READING_MAX_W} max-h-[75vh] overflow-y-auto`}>
-        {turns.map((turn, i) => (
-          // No speaker attribution here, for the same reason
-          // `LiveTranscriptStream` dropped it — the live tier only ever sees
-          // `mic.wav`, so every turn was labelled "You" including the other
-          // party's voice bleeding in through the speakers. See that
-          // component's `TranscriptTurnRow` doc comment.
-          // Same append/replace-only list it renders — see its own note.
-          // biome-ignore lint/suspicious/noArrayIndexKey: append/replace-only list
-          <div className="flex gap-3 py-3" key={i}>
-            <span className="type-body w-12 shrink-0 pt-0.5 text-tertiary tabular-nums">
-              {formatTs(turn.tsStartMs)}
-            </span>
-            <p className="type-body-lg min-w-0 flex-1 text-primary leading-relaxed">{turn.text}</p>
-          </div>
-        ))}
-      </div>
+    <div className={`${READING_MAX_W} mx-auto max-h-[75vh] overflow-y-auto`}>
+      {/* `bg-canvas` is the surface this page sits on (`MainPane`), which the
+          sticky caption inside has to paint to stay opaque. */}
+      <LiveTranscriptList surfaceClassName="bg-canvas" turns={turns} />
     </div>
   );
 }
@@ -103,13 +89,26 @@ function ConversationRoute() {
   const { conversationId } = Route.useParams();
   const detail = useConversationDetail(conversationId);
   const live = useConversationPipelineProgress(conversationId);
+  // `live` above is already the plain value (or `undefined`) now — a store
+  // selector, not a `useQuery` result — so nothing here reads `.data`.
   const regenerate = useRegenerateSummary(conversationId);
   const setOpenQuestionOwner = useSetOpenQuestionOwner(conversationId);
+  const setOpenQuestionResolved = useSetOpenQuestionResolved(conversationId);
+  const deleteItem = useDeleteExtractionItem(conversationId);
+  const setItemText = useSetExtractionText(conversationId);
+  // One object, built once, threaded into all three sections — the sections
+  // take the pair together precisely so a caller can't wire up delete and
+  // forget edit.
+  const rowMutations = {
+    onDelete: (kind: ExtractionKind, itemId: string) => deleteItem.mutate({ kind, itemId }),
+    onTextChange: (kind: ExtractionKind, itemId: string, text: string) =>
+      setItemText.mutate({ kind, itemId, text }),
+  };
   const recordingConversationId = useRecordingStore((s) => s.conversationId);
-  // Gap #1: this window's own live session owns this conversation right now
+  // This window's own live session owns this conversation right now
   // — mirrors `ConversationRow`'s `isLiveHere` and `/recording`'s own guard.
-  // W17b: deliberately *excludes* `"stopping"`. `useStopRecording` navigates
-  // here optimistically the moment Stop is clicked (LLD-11 §5's "Stop ->
+  // Deliberately *excludes* `"stopping"`. `useStopRecording` navigates
+  // here optimistically the moment Stop is clicked (per the "Stop ->
   // Detail transition guarantee") while the store still reads `"stopping"`
   // and the cached row still reads `recording`. Counting that as "live here"
   // bounced the user straight back to `/recording`, which re-mounted
@@ -125,8 +124,8 @@ function ConversationRoute() {
       s.conversationId === conversationId,
   );
 
-  // Chat pane auto-scope (02_DASHBOARD_AND_NAV.md: "On Conversation Detail +
-  // no active chat context: scope = that conversation") — same pattern as
+  // Chat pane auto-scope: "On Conversation Detail + no active chat context:
+  // scope = that conversation" — same pattern as
   // the project route's own auto-scope effect. No guard against clobbering
   // an existing selection here: Conversation is chat's most specific scope
   // (`chatScope.ts`'s `scopeKey` already prefers it over `projectId`
@@ -141,6 +140,24 @@ function ConversationRoute() {
       }
     };
   }, [conversationId, selectConversation]);
+
+  // Computed unconditionally (optional-chained, so it's safe before `detail`
+  // has loaded) because the dismiss state right below it has to be a hook,
+  // and hooks can't sit after the pending/error early returns further down.
+  const state = deriveDisplayState(
+    detail.data?.conversation.status,
+    detail.data?.pipeline_step,
+    live,
+  );
+
+  // The inline failure banner's own close button. Re-arms whenever the
+  // conversation leaves the failed state, so a *later* failure (a second
+  // Retry that fails again) shows its own banner rather than staying hidden
+  // because an earlier one was dismissed.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  useEffect(() => {
+    if (state.kind !== "failed") setBannerDismissed(false);
+  }, [state.kind]);
 
   if (detail.isPending) {
     return (
@@ -173,9 +190,7 @@ function ConversationRoute() {
     open_questions,
   } = detail.data;
 
-  const state = deriveDisplayState(conversation.status, detail.data.pipeline_step, live.data);
-
-  // Gap #1: this window is the one actively recording this conversation —
+  // This window is the one actively recording this conversation —
   // the live screen (with real controls, the level meter, etc.) is the
   // correct place for it, not this read-mostly Detail route. Defensive
   // against a stale deep-link / back-navigation landing here mid-recording
@@ -216,7 +231,7 @@ function ConversationRoute() {
   const extractionPending = state.kind === "processing";
   const transcriptText = transcript
     ? transcript.turns
-        .map((t) => `[${formatTs(t.ts_start_ms)}] ${t.speaker_label}: ${t.text}`)
+        .map((t) => `[${formatMmSs(t.ts_start_ms)}] ${t.speaker_label}: ${t.text}`)
         .join("\n")
     : "";
   // Overflow menu's "Copy as Markdown" — `null` until there's at least a
@@ -241,10 +256,10 @@ function ConversationRoute() {
       />
 
       {state.kind === "processing" ? (
-        <ProcessingOverlay fallbackStep={detail.data.pipeline_step} live={live.data} />
+        <ProcessingOverlay fallbackStep={detail.data.pipeline_step} live={live} />
       ) : null}
 
-      {/* Gap #1: DB truth says `status === "recording"` but this window has
+      {/* DB truth says `status === "recording"` but this window has
           no live session for it (a second window/process owns it, or the
           local store hasn't caught up yet) — the explicit `deriveDisplayState`
           case that keeps this from silently reading as "finalizing". */}
@@ -260,19 +275,29 @@ function ConversationRoute() {
         </div>
       ) : null}
 
-      {state.kind === "failed" && hasAnyContent ? (
+      {state.kind === "failed" && hasAnyContent && !bannerDismissed ? (
         <div className="flex items-center justify-between gap-3 border-subtle border-b bg-danger-bg px-8 py-3">
           <p className="type-body text-primary">
             {detail.data.pipeline_error ?? `Processing failed during ${state.step}.`}
           </p>
-          <Button
-            disabled={regenerate.isPending}
-            onClick={() => regenerate.mutate()}
-            size="default"
-            variant="secondary"
-          >
-            {regenerate.isPending ? "Retrying…" : "Retry"}
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              disabled={regenerate.isPending}
+              onClick={() => regenerate.mutate()}
+              size="default"
+              variant="secondary"
+            >
+              {regenerate.isPending ? "Retrying…" : "Retry"}
+            </Button>
+            <Button
+              aria-label="Dismiss"
+              onClick={() => setBannerDismissed(true)}
+              size="icon"
+              variant="ghost"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </Button>
+          </div>
         </div>
       ) : null}
 
@@ -293,48 +318,41 @@ function ConversationRoute() {
         </TabsList>
 
         <TabsContent value="overview">
-          <Section
-            action={
-              summary_markdown ? (
-                <div className="flex items-center gap-2">
-                  <CopyButton label="Copy summary" text={summary_markdown} />
+          {summary_markdown ? (
+            <SummarySection
+              conversationId={conversationId}
+              markdown={summary_markdown}
+              onRegenerate={() => regenerate.mutate()}
+              regenerating={regenerate.isPending}
+            />
+          ) : (
+            <Section icon={FileText} title="Summary">
+              {extractionPending ? (
+                <WaitingRow label="Generating summary…" />
+              ) : (
+                <div className="flex flex-col items-start gap-3">
+                  <p className="type-body text-secondary">No summary yet.</p>
                   <Button
                     disabled={regenerate.isPending}
                     onClick={() => regenerate.mutate()}
-                    size="default"
-                    variant="ghost"
+                    variant="secondary"
                   >
-                    {regenerate.isPending ? "Regenerating…" : "Regenerate"}
+                    {regenerate.isPending ? "Generating…" : "Generate Summary"}
                   </Button>
                 </div>
-              ) : undefined
-            }
-            icon={FileText}
-            title="Summary"
-          >
-            {summary_markdown ? (
-              <MarkdownView markdown={summary_markdown} />
-            ) : extractionPending ? (
-              <WaitingRow label="Generating summary…" />
-            ) : (
-              <div className="flex flex-col items-start gap-3">
-                <p className="type-body text-secondary">No summary yet.</p>
-                <Button
-                  disabled={regenerate.isPending}
-                  onClick={() => regenerate.mutate()}
-                  variant="secondary"
-                >
-                  {regenerate.isPending ? "Generating…" : "Generate Summary"}
-                </Button>
-              </div>
-            )}
-          </Section>
+              )}
+            </Section>
+          )}
 
           <Section icon={CheckSquare} title="Action Items">
             {extractionPending && action_items.length === 0 ? (
               <WaitingRow label="Extracting action items…" />
             ) : (
-              <ActionItemsSection conversationId={conversationId} items={action_items} />
+              <ActionItemsSection
+                conversationId={conversationId}
+                items={action_items}
+                mutations={rowMutations}
+              />
             )}
           </Section>
 
@@ -342,7 +360,7 @@ function ConversationRoute() {
             {extractionPending && decisions.length === 0 ? (
               <WaitingRow label="Extracting decisions…" />
             ) : (
-              <DecisionsSection decisions={decisions} />
+              <DecisionsSection decisions={decisions} mutations={rowMutations} />
             )}
           </Section>
 
@@ -351,8 +369,12 @@ function ConversationRoute() {
               <WaitingRow label="Extracting open questions…" />
             ) : (
               <OpenQuestionsSection
-                onOwnerChange={(questionId, ownerHint) =>
-                  setOpenQuestionOwner.mutate({ questionId, ownerHint })
+                mutations={rowMutations}
+                onOwnerChange={(questionId, ownerHint, isSelf) =>
+                  setOpenQuestionOwner.mutate({ questionId, ownerHint, isSelf })
+                }
+                onResolvedChange={(questionId, resolved) =>
+                  setOpenQuestionResolved.mutate({ questionId, resolved })
                 }
                 questions={open_questions}
               />
@@ -364,7 +386,7 @@ function ConversationRoute() {
           <div className="py-4">
             {transcript ? (
               <>
-                <div className={`${READING_MAX_W} mb-3 flex justify-end`}>
+                <div className={`${READING_MAX_W} mx-auto mb-3 flex justify-end`}>
                   <CopyButton label="Copy transcript" text={transcriptText} />
                 </div>
                 <TranscriptPane turns={transcript.turns} />

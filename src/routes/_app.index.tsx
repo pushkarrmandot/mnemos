@@ -13,8 +13,8 @@ import { conversationFilter, conversationScopeKey } from "@/queries/conversation
 import { qk, staleTimes } from "@/queries/keys";
 
 /**
- * `/` — Dashboard. W19 fills in YOUR TO-DOS and PROJECT PULSE
- * (`02_DASHBOARD_AND_NAV.md`) — TODAY still doesn't render; it needs
+ * `/` — Dashboard. YOUR TO-DOS and PROJECT PULSE are filled in
+ * — TODAY still doesn't render; it needs
  * calendar integration (v1.4), which doesn't exist. Shell widened from
  * `max-w-[640px]` to `1400px` to match every other page (Project Detail,
  * Conversation Detail) now that this page has more than one reading column
@@ -69,9 +69,9 @@ function formatToday(): string {
 
 function DashboardRoute() {
   const startRecording = useRequestStartRecording();
-  // "Is the dashboard empty" needs a number, not the library. This shared the
-  // conversation *list* query until W18, which meant deciding whether to show
-  // a checklist cost a full-table read.
+  // "Is the dashboard empty" needs a number, not the library — a count
+  // query, kept separate from the conversation *list* query, so deciding
+  // whether to show a checklist doesn't cost a full-table read.
   const scope = conversationFilter();
   const conversationCount = useQuery({
     queryFn: () => commands.countConversations(scope),
@@ -95,7 +95,7 @@ function DashboardRoute() {
     return null;
   }
 
-  // First-run checklist (`01_ONBOARDING.md`'s "Landing" section) replaces
+  // First-run checklist (the "Landing" section) replaces
   // the normal sections below until both rows are satisfied — "record"
   // derives from `!isEmpty` (no separate flag to drift from reality),
   // "connect calendar" from the dismiss flag set by clicking its own

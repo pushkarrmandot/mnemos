@@ -12,7 +12,7 @@ export function resolveTheme(preference: ThemePreference): ResolvedTheme {
 }
 
 /**
- * The only writer of `<html data-theme>` (SHELL_CHEATSHEET.md §3).
+ * The only writer of `<html data-theme>`.
  *
  * `"system"` stays live: the media-query listener re-applies on OS change with
  * no reload. First paint is already correct thanks to the inline script in

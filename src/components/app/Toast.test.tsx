@@ -5,7 +5,7 @@ import { toast } from "@/lib/toast";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * SHELL_CHEATSHEET.md §4 TTL policy and §9's toast row. The timers live in the
+ * TTL policy. The timers live in the
  * component, so this is where they're pinned: 4 s info/success, 6 s warn, and
  * an error that waits for the user.
  */
@@ -32,8 +32,8 @@ describe("Toast", () => {
 
   it("auto-dismisses an info toast at 4 s", () => {
     render(<ToastAnchor />);
-    act(() => void toast.info("Recording arrives in W7."));
-    expect(screen.getByText("Recording arrives in W7.")).toBeInTheDocument();
+    act(() => void toast.info("Recording is ready."));
+    expect(screen.getByText("Recording is ready.")).toBeInTheDocument();
 
     advance(3999);
     expect(useUIStore.getState().toasts).toHaveLength(1);
@@ -65,7 +65,7 @@ describe("Toast", () => {
 
   it("dismisses on the close button", () => {
     render(<ToastAnchor />);
-    act(() => void toast.info("Projects arrive in W15."));
+    act(() => void toast.info("Projects are ready."));
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     finishExit();

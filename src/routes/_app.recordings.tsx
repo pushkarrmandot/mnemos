@@ -15,16 +15,16 @@ import { usePagedConversations } from "@/queries/paged";
 /**
  * `/recordings` — the conversation archive. Defaults to unfiled
  * (`project_id IS NULL`), which is the left nav's "Recordings" destination and
- * a permanent, first-class state (W15), but the project filter can widen it to
+ * a permanent, first-class state, but the project filter can widen it to
  * anything.
  *
- * W18 made this a real archive rather than a dump. It used to call
- * `listConversations(null)` — every conversation ever recorded — and filter to
- * the unfiled ones in JavaScript. The filters below are not decoration: on a
- * personal meeting archive you can almost always *describe* what you are
- * looking for (a project, a month, a word in the title), so filtering is the
- * primary way through and paging is the fallback. That is why there are no
- * page numbers.
+ * A real archive, not a dump: it filters server-side to unfiled rows rather
+ * than calling `listConversations(null)` — every conversation ever recorded
+ * — and filtering to the unfiled ones in JavaScript. The filters below are
+ * not decoration: on a personal meeting archive you can almost always
+ * *describe* what you are looking for (a project, a month, a word in the
+ * title), so filtering is the primary way through and paging is the
+ * fallback. That is why there are no page numbers.
  */
 export const Route = createFileRoute("/_app/recordings")({
   component: RecordingsRoute,

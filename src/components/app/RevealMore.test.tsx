@@ -68,4 +68,52 @@ describe("RevealMore", () => {
     expect(button).toBeDisabled();
     expect(button).toHaveTextContent(/loading/i);
   });
+
+  /**
+   * In the 208px left nav this rendered "Show 2 more" beside "2 remaining" —
+   * the same number twice, wrapped across two ragged lines. The suffix is
+   * only worth its width when it reports something past this page.
+   */
+  it("drops the remaining count when it just repeats the label's number", () => {
+    render(
+      <RevealMore hasMore={true} isLoading={false} onClick={vi.fn()} pageSize={10} remaining={2} />,
+    );
+    expect(screen.getByText(/show 2 more/i)).toBeInTheDocument();
+    expect(screen.queryByText(/remaining/i)).toBeNull();
+  });
+
+  it("keeps the remaining count when more is left than this page reveals", () => {
+    render(
+      <RevealMore
+        hasMore={true}
+        isLoading={false}
+        onClick={vi.fn()}
+        pageSize={20}
+        remaining={108}
+      />,
+    );
+    expect(screen.getByText("108 remaining")).toBeInTheDocument();
+  });
+
+  /**
+   * The suffix used to trail the label on the same row (`ml-auto`), which
+   * only stayed readable above whatever width the two strings happened to
+   * fit in — the 208px left nav was narrower than that. A fixed second row
+   * is correct at any width, so this checks structure, not just that both
+   * strings are present somewhere in the button.
+   */
+  it("puts the remaining count on its own line, not trailing the label", () => {
+    render(
+      <RevealMore
+        hasMore={true}
+        isLoading={false}
+        onClick={vi.fn()}
+        pageSize={20}
+        remaining={108}
+      />,
+    );
+    const label = screen.getByText("Show 20 more");
+    const suffix = screen.getByText("108 remaining");
+    expect(label.parentElement).not.toBe(suffix.parentElement);
+  });
 });

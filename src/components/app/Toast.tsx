@@ -5,13 +5,13 @@ import { t } from "@/lib/i18n";
 import { type ToastKind, type Toast as ToastModel, useUIStore } from "@/stores/ui";
 
 /**
- * DESIGN_SYSTEM.md §13 #7 + §21 (Toast override row): slide-up 8px + fade on
+ * Slide-up 8px + fade on
  * `motion-tuck` enter, no colored bar, icon only when the toast carries status.
  *
- * Dismissal lives here rather than in the store (LLD-10 §3.1 keeps the store
+ * Dismissal lives here rather than in the store (keeps the store
  * free of timers): the toast schedules its own `ttlMs` timeout, plays the exit
  * fade, and only then calls `dismissToast`. `ttlMs: 0` is sticky — errors wait
- * for the user, per SHELL_CHEATSHEET.md §4.
+ * for the user.
  */
 const icons: Record<ToastKind, ComponentType<{ className?: string }>> = {
   info: Info,

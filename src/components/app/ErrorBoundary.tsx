@@ -6,8 +6,8 @@ import { t } from "@/lib/i18n";
 declare global {
   interface Window {
     /**
-     * PROVISIONAL (SHELL_CHEATSHEET.md §7) — the Rust `tracing` sink. W1 did
-     * not install it; until it exists we log to the console and keep going.
+     * PROVISIONAL — the Rust `tracing` sink is not installed yet; until it
+     * exists we log to the console and keep going.
      */
     __MNEMOS_REPORT_ERROR__?: (error: Error, info: ErrorInfo) => void;
   }
@@ -40,7 +40,7 @@ class Boundary extends Component<BoundaryProps, BoundaryState> {
   override render(): ReactNode {
     if (!this.state.error) return this.props.children;
 
-    // DESIGN_SYSTEM.md §19 "Full sad path": what happened, then one next step.
+    // "Full sad path": what happened, then one next step.
     return (
       <div className="flex h-full flex-col items-center justify-start overflow-auto">
         <EmptyState
@@ -58,7 +58,7 @@ class Boundary extends Component<BoundaryProps, BoundaryState> {
 
 /**
  * Wraps one region. `<MainPane>` and `<RightRail>` get their own instances so a
- * crash in chat can't take the dashboard down with it (SHELL_CHEATSHEET.md §7).
+ * crash in chat can't take the dashboard down with it.
  * "Reload this section" re-mounts the subtree by bumping a key.
  */
 export function ErrorBoundary({ children }: { children: ReactNode }) {

@@ -5,7 +5,7 @@ import { type MessageKey, t } from "@/lib/i18n";
 import { THEME_PREFERENCES, type ThemePreference, useUIStore } from "@/stores/ui";
 
 /**
- * DESIGN_SYSTEM.md §9 — Settings → Appearance → Light / Dark / System.
+ * Settings → Appearance → Light / Dark / System.
  *
  * A segmented radio group, not a switch: three states can't be a toggle, and
  * the current value has to be readable at a glance without opening a menu.

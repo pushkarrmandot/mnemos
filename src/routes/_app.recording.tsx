@@ -6,9 +6,9 @@ import { RecordingHeader } from "@/features/active-conversation/RecordingHeader"
 import { useRecordingStore } from "@/stores/recording";
 
 /**
- * `/recording` — Active Conversation (LLD-11 §3.1). Mounts while
+ * `/recording` — Active Conversation. Mounts while
  * `state ∈ {arming, recording, paused, stopping}`. A stale deep-link with
- * `state === "idle"` redirects to Dashboard — defensive per the LLD.
+ * `state === "idle"` redirects to Dashboard — defensive.
  */
 export const Route = createFileRoute("/_app/recording")({
   component: ActiveConversationRoute,

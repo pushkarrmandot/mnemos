@@ -9,7 +9,7 @@ export type SegmentedOption<T extends string> = {
 };
 
 /**
- * Two-or-three-way switch that lives in a `<Section>`'s `action` slot (W18).
+ * Two-or-three-way switch that lives in a `<Section>`'s `action` slot.
  *
  * Used for Open/Done and Open/Resolved. These are *two different queries*, not
  * a client-side filter over one list, so the selected value belongs in the

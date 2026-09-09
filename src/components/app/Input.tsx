@@ -3,7 +3,7 @@ import { Input as UiInput } from "@/components/ui/input";
 import { cn } from "@/lib/cn";
 
 /**
- * DESIGN_SYSTEM.md §21 (Input override row): 32px tall, no blue focus ring —
+ * 32px tall, no blue focus ring —
  * the border goes to `--accent-primary` on focus and the universal focus ring
  * from reset.css does the rest. Strips shadcn's `shadow-xs` and 36px height.
  */

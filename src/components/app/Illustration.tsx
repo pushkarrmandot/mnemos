@@ -1,7 +1,7 @@
 import { cn } from "@/lib/cn";
 
 /**
- * DESIGN_SYSTEM.md §16 — illustration slots.
+ * Illustration slots.
  *
  * v1 renders `<PlaceholderLine>`: one single-stroke figure per slot, drawn in
  * `--accent-primary` at 1.25px. v1.1 swaps in commissioned art behind the same
@@ -76,7 +76,7 @@ const paths: Record<IllustrationSlot, readonly string[]> = {
 
 type IllustrationProps = {
   slot: IllustrationSlot;
-  /** `empty` caps at 240×180 (§16); `hero` at 480×360 for first-run surfaces. */
+  /** `empty` caps at 240×180; `hero` at 480×360 for first-run surfaces. */
   scale?: "empty" | "hero" | "inline";
   className?: string;
 };

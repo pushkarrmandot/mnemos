@@ -17,11 +17,11 @@ import { ACTIVE_CAPTURE_STATES, useRecordingStore } from "@/stores/recording";
 import { useSelectionStore } from "@/stores/selection";
 
 /**
- * `/project/$projectId` — Project Detail (LLD-12g / `pages/05_PROJECT_MEMORY.md`).
- * Renders all five of 05's sections: Overview and Scope drift (synthesized,
+ * `/project/$projectId` — Project Detail.
+ * Renders all five spec sections: Overview and Scope drift (synthesized,
  * via `<ProjectMemoryPane>`), Decisions and Open questions (reactive, via
  * `<ProjectExtractions>`), and Recent conversations. Still out of scope from
- * 05's full spec: header actions (pin, archive, export), inline markdown
+ * the full spec: header actions (pin, archive, export), inline markdown
  * editing, `[+ Add]` manual entry, supersession strikethrough, `N days open`
  * question ageing, and the Jump rail.
  */
@@ -32,8 +32,8 @@ export const Route = createFileRoute("/_app/project/$projectId")({
 /**
  * Header Record CTA. Mirrors `TopBar`'s `RecordButton` semantics rather than
  * calling `mutate` directly — `.request()` is what shows the soft
- * confirmation when a previous conversation is still transcribing (LLD-11
- * §5's Gap #2), and `arm()` already refuses while a capture is live. While
+ * confirmation when a previous conversation is still transcribing,
+ * and `arm()` already refuses while a capture is live. While
  * one is running this becomes a link back to the live screen, so the button
  * never silently no-ops.
  */
@@ -72,9 +72,9 @@ function ProjectRoute() {
   const selectProject = useSelectionStore((s) => s.selectProject);
   const startRecording = useRequestStartRecording();
 
-  // Chat pane auto-scope (02_DASHBOARD_AND_NAV.md: "On Project page + no
+  // Chat pane auto-scope: "On Project page + no
   // active chat context: scope = that project" — but "if chat already has
-  // an active conversation open, DO NOT change scope", hence the guard).
+  // an active conversation open, DO NOT change scope", hence the guard.
   useEffect(() => {
     if (useSelectionStore.getState().conversationId) return;
     selectProject(projectId);
@@ -141,11 +141,11 @@ function ProjectRoute() {
             {conversationCount.data === 1 ? "" : "s"}
           </p>
         </div>
-        {/* W17c: the Record CTA used to live only in the empty state, so the
-            moment a project had one conversation the only way to record into
-            it was the top bar's project picker. Recording *into the project
-            you're looking at* is this page's primary action, so it belongs in
-            the header where it survives the empty->populated transition. */}
+        {/* The Record CTA lives in the header, not just the empty state, so
+            it survives the empty->populated transition — recording *into
+            the project you're looking at* is this page's primary action,
+            and it shouldn't disappear once a project has its first
+            conversation, leaving only the top bar's project picker. */}
         <ProjectRecordButton projectId={projectId} />
       </div>
 
@@ -161,7 +161,7 @@ function ProjectRoute() {
           illustration="empty-project"
         />
       ) : (
-        // 05_PROJECT_MEMORY.md's section order: Overview, Decisions, Open
+        // Section order: Overview, Decisions, Open
         // questions, Scope drift, Recent conversations. `ProjectMemoryPane`
         // renders Overview and Scope drift, so the reactive block sits
         // between its two halves rather than after it.

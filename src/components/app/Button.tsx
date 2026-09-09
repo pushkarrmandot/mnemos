@@ -3,11 +3,9 @@ import { Button as UiButton } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
 /**
- * DESIGN_SYSTEM.md §7 (button table) + §21 (shadcn override row).
- *
  * Strips shadcn's 36px height, `rounded-md`, focus ring and `shadow-xs`, and
  * replaces the variant palette with Mnemos tokens. Feature code imports from
- * here, never from `@/components/ui/button` (FRONTEND_STANDARDS §4).
+ * here, never from `@/components/ui/button`.
  */
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "destructive";
 export type ButtonSize = "default" | "lg" | "icon";

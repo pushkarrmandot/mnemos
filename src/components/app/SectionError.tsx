@@ -1,7 +1,7 @@
 import { RotateCw } from "lucide-react";
 
 /**
- * A query failure confined to the one section it broke (W19).
+ * A query failure confined to the one section it broke.
  *
  * Every other page in the app collapses to a full `<EmptyState>` sad-path
  * when its one query fails (`Project Detail`, `Conversation Detail`). Home

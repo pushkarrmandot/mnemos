@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { EmptyState } from "@/components/app/EmptyState";
 import { t } from "@/lib/i18n";
 
-/** `/contacts` — list arrives with LLD-12d. */
+/** `/contacts` — not yet implemented, placeholder page. */
 export const Route = createFileRoute("/_app/contacts")({
   component: ContactsRoute,
 });

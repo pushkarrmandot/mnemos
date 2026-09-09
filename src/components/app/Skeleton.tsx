@@ -1,7 +1,7 @@
 import { cn } from "@/lib/cn";
 
 /**
- * A shimmering placeholder block — Home's loading state (W19). Nothing like
+ * A shimmering placeholder block — Home's loading state. Nothing like
  * this existed in the app before; every other page renders `null` while its
  * query is pending. Worth the new primitive here specifically because Home
  * is the first page built from several independent queries at once (to-dos,
