@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Embedded into the binary's __TEXT,__info_plist section (see the linker
+	  flags in Package.swift) rather than shipped as a file, because this is
+	  a bare executable, not an .app bundle.
+
+	  Without it the sidecar has no bundle identity at all. Living in the
+	  packaged app's Contents/MacOS/ means LaunchServices treats it as an
+	  application, so every recording put a second, nameless Mnemos icon in
+	  the Dock that bounced forever — it never calls NSApplicationMain, so
+	  it never "finishes launching". LSUIElement marks it an agent: no Dock
+	  icon, no app switcher entry, no bounce.
+
+	  CFBundleIdentifier matches the host app on purpose. TCC resolves this
+	  helper's mic/screen requests to the parent as the responsible process,
+	  and sharing the identifier keeps that attribution unambiguous instead
+	  of risking a second permission entry for a binary users can't
+	  recognise.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>sh.mnemos.desktop</string>
+	<key>CFBundleName</key>
+	<string>Mnemos Audio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Mnemos records the audio your Mac plays so it can transcribe what other people say in your meetings. Audio stays on this Mac and is never uploaded.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Mnemos records your microphone so it can transcribe your meetings. Audio stays on this Mac and is never uploaded.</string>
+</dict>
+</plist>
