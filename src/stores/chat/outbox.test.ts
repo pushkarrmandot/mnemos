@@ -29,9 +29,12 @@ describe("chat outbox", () => {
     const beforeEcho = pendingForSession(useChatStore.getState().outbox, SESSION, []);
     expect(beforeEcho).toHaveLength(1);
 
-    // The durable row arrives carrying the same clientId — the render-time
-    // dedupe drops the optimistic copy immediately, with no state race.
-    const durable = [{ clientId: entry.clientId }];
+    // The durable row arrives — the render-time dedupe drops the optimistic
+    // copy immediately, with no state race. Matched on text: `clientId` is
+    // client-only and never reaches the journal, so an earlier version of
+    // this test built a `{ clientId }` row that no backend ever produces and
+    // passed while the real UI double-rendered every first message.
+    const durable = [{ role: "user" as const, text: "hello" }];
     expect(pendingForSession(useChatStore.getState().outbox, SESSION, durable)).toHaveLength(0);
 
     useChatStore.getState().confirmOutbox(entry.clientId);
@@ -130,5 +133,22 @@ describe("chat streaming state", () => {
     expect(useChatStore.getState().bySession["never-seen"]).toBeUndefined();
     useChatStore.getState().ensureSession("never-seen");
     expect(useChatStore.getState().bySession["never-seen"]).toEqual(EMPTY_SESSION);
+  });
+
+  it("retires one optimistic bubble per durable row, not all matching ones", () => {
+    // Same text sent twice while the first is still in flight. One durable
+    // row has landed, so exactly one bubble should still render — a set
+    // membership test would wrongly hide both.
+    useChatStore.getState().enqueueOutbox(SESSION, "ok");
+    useChatStore.getState().enqueueOutbox(SESSION, "ok");
+
+    const durable = [{ role: "user" as const, text: "ok" }];
+    expect(pendingForSession(useChatStore.getState().outbox, SESSION, durable)).toHaveLength(1);
+  });
+
+  it("ignores assistant messages when matching", () => {
+    useChatStore.getState().enqueueOutbox(SESSION, "echo this");
+    const durable = [{ role: "assistant" as const, text: "echo this" }];
+    expect(pendingForSession(useChatStore.getState().outbox, SESSION, durable)).toHaveLength(1);
   });
 });

@@ -11,12 +11,12 @@ export interface ModelDownloadState {
 const IDLE: ModelDownloadState = { receivedBytes: 0, totalBytes: 0, done: false };
 
 /**
- * Model-download byte progress (LLD-10 §5.5). rAF-batched so a 100 Hz byte
+ * Model-download byte progress. rAF-batched so a 100 Hz byte
  * counter does not drive 100 renders a second.
  *
  * State is local rather than in a store: onboarding is the only consumer and
- * nothing outside the progress bar reads it. LLD-12f may promote it to a
- * dedicated store if a second consumer appears.
+ * nothing outside the progress bar reads it. A dedicated store would be
+ * worth promoting to if a second consumer appears.
  */
 export function useModelDownloadChannel(modelId: string | null): ModelDownloadState {
   const [progress, setProgress] = useState<ModelDownloadState>(IDLE);

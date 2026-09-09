@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventName, EventPayloads } from "@/ipc/events";
 import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
+import { useConversationPipelineStore } from "@/stores/conversationPipeline";
 import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 import { useTauriEventBridge } from "./useTauriEventBridge";
@@ -43,6 +44,7 @@ describe("useTauriEventBridge", () => {
     unlisten.mockClear();
     useUIStore.setState({ toasts: [] });
     useRecordingStore.getState().reset();
+    useConversationPipelineStore.getState().reset();
     queryClient.clear();
   });
 
@@ -54,13 +56,13 @@ describe("useTauriEventBridge", () => {
 
     const keys = invalidate.mock.calls.map((call) => call[0]?.queryKey);
     expect(keys).toContainEqual(qk.conversation("conv-1"));
-    // W17c: the project *prefix* — Project Memory's reactive
+    // The project *prefix* — Project Memory's reactive
     // Decisions/Open-questions sections live under it and must refresh on the
-    // same event (05_PROJECT_MEMORY.md's "Reactive lists update instantly").
+    // same event ("Reactive lists update instantly").
     // The conversation list itself is covered separately by `qk.conversations()`
-    // above (W18's paged queries live under that prefix, not this one).
+    // above — the paged queries live under that prefix, not this one.
     expect(keys).toContainEqual(qk.project("proj-1"));
-    // A new conversation invalidates every cached search (LLD-10 §6).
+    // A new conversation invalidates every cached search.
     expect(keys).toContainEqual(["search"]);
   });
 
@@ -82,7 +84,50 @@ describe("useTauriEventBridge", () => {
     expect(useRecordingStore.getState().state).toBe("idle");
   });
 
-  it("writes pipeline progress straight into the cache — no refetch", () => {
+  it("resets a stuck-in-recording store when the backend ends it abnormally", () => {
+    // Reproduces a real bug: a device_lost / sidecar_exited / disk_full
+    // failure is handled entirely on the backend (session torn down,
+    // sidecar stopped) — this event is the only thing that ever reaches
+    // the frontend about it. The store only otherwise leaves "recording"
+    // via the explicit Stop mutation, which never runs on this path. Left
+    // unhandled, `state` stays "recording" forever with a `sessionId` the
+    // backend has already forgotten: Start New Recording stays disabled
+    // (gated on `state === "idle"`) and Stop fails with "session not
+    // found" — the window is stuck until the whole app is quit.
+    renderHook(() => useTauriEventBridge());
+
+    const store = useRecordingStore.getState();
+    store.arm("proj-1");
+    store.markRecording({ sessionId: 3, conversationId: "conv-1", startedAtMs: 0 });
+
+    emit("recordingWarning", {
+      conversation_id: "conv-1",
+      kind: "device_lost",
+      message: "audio engine configuration changed",
+    });
+
+    expect(useRecordingStore.getState().state).toBe("idle");
+    expect(useRecordingStore.getState().sessionId).toBeNull();
+  });
+
+  it("does not reset the store for a recordingWarning on a different conversation", () => {
+    renderHook(() => useTauriEventBridge());
+
+    const store = useRecordingStore.getState();
+    store.arm("proj-1");
+    store.markRecording({ sessionId: 3, conversationId: "conv-1", startedAtMs: 0 });
+
+    emit("recordingWarning", {
+      conversation_id: "conv-other",
+      kind: "device_lost",
+      message: "audio engine configuration changed",
+    });
+
+    expect(useRecordingStore.getState().state).toBe("recording");
+    expect(useRecordingStore.getState().sessionId).toBe(3);
+  });
+
+  it("writes pipeline progress straight into the live-progress store", () => {
     renderHook(() => useTauriEventBridge());
     const payload = {
       conversation_id: "conv-1",
@@ -93,7 +138,40 @@ describe("useTauriEventBridge", () => {
 
     emit("processingProgress", payload);
 
-    expect(queryClient.getQueryData(qk.conversationPipeline("conv-1"))).toEqual(payload);
+    expect(useConversationPipelineStore.getState()).toMatchObject({
+      conversationId: "conv-1",
+      step: "diarize",
+      status: "running",
+      pct: 40,
+    });
+  });
+
+  it("clears the live-progress slot on conversationReady, for the conversation it belongs to", () => {
+    renderHook(() => useTauriEventBridge());
+    useConversationPipelineStore.getState().setProgress({
+      conversation_id: "conv-1",
+      step: "extracting",
+      status: "running",
+      pct: null,
+    });
+
+    emit("conversationReady", { conversation_id: "conv-1", project_id: null });
+
+    expect(useConversationPipelineStore.getState().conversationId).toBeNull();
+  });
+
+  it("leaves a different conversation's live-progress slot alone on conversationReady", () => {
+    renderHook(() => useTauriEventBridge());
+    useConversationPipelineStore.getState().setProgress({
+      conversation_id: "conv-other",
+      step: "extracting",
+      status: "running",
+      pct: null,
+    });
+
+    emit("conversationReady", { conversation_id: "conv-1", project_id: null });
+
+    expect(useConversationPipelineStore.getState().conversationId).toBe("conv-other");
   });
 
   it("raises a sticky toast on storageCritical", () => {

@@ -1,18 +1,14 @@
 /**
- * Scope <-> key helpers shared by every chat piece that needs to talk about
- * "which scope" without going through the backend first.
+ * Scope helpers: turning the pane's current selection into the shape the
+ * backend takes, and comparing two scopes for identity.
  *
- * `scopeKey` exists because of a real bug found while wiring this up:
- * nothing in the app ever set `useSelectionStore.chatSessionId` (its only
- * setter, `selectChatSession`, had zero callers), and sending a message
- * required it to already be set — a permanent deadlock, so Send never
- * actually worked through the UI. The fix: local chat state (draft input,
- * live streaming, outbox) is keyed by *scope* — always known immediately,
- * no backend round trip needed — not by the backend's session id, which
- * only becomes known after a resolve query or a send's ack. `chatSessionId`
- * still exists, but now means "the resolved backend session id, once
- * known", used only where the backend actually requires it (history fetch,
- * cancel, rename).
+ * **`scopeKey` is not a state key.** It used to be: local chat state
+ * (draft, streaming buffer, outbox) was keyed by scope, because the backend
+ * minted session ids and one wasn't known until a send's ack came back.
+ * That made two chats in the same scope share one slice of local state, and
+ * every fix for it was another explicit reset. The frontend now mints the
+ * session id, so all of that keys off the id itself and this is only ever
+ * used to answer "is the pane still looking at the same scope?".
  */
 import type { ChatScopeInput } from "@/ipc/client";
 

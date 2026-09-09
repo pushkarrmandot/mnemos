@@ -15,13 +15,14 @@ beforeEach(() => {
 });
 
 /**
- * Regression coverage for a real bug: the terminal-event handler used to
- * invalidate `qk.chat(localKey)` (the scope-derived local key, e.g.
- * `"conversation:abc"`) instead of `qk.chat(realSessionId)` — the cache
- * entry `MessageList.tsx` actually reads durable history from. That mismatch
- * meant a finished turn's history refresh silently invalidated a cache entry
- * nothing reads, so the outbox bubble and the (never-refreshed) durable copy
- * could both be visible at once until something unrelated forced a refetch.
+ * Regression guard: the terminal-event handler must
+ * invalidate `qk.chat(realSessionId)` — the cache
+ * entry `MessageList.tsx` actually reads durable history from — never
+ * `qk.chat(localKey)` (the scope-derived local key, e.g.
+ * `"conversation:abc"`). Invalidating the local key would silently miss the
+ * cache entry that's actually read, so the outbox bubble and the
+ * (never-refreshed) durable copy could both be visible at once until
+ * something unrelated forced a refetch.
  */
 describe("makeChatStreamChannel", () => {
   it("invalidates the real backend session's cache, not the local scope key", () => {

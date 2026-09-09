@@ -29,7 +29,7 @@ function relativeTime(unixSeconds: number): string {
  * a later "New chat", newest-updated first. Reopening a Project/
  * Conversation-scoped session updates selection directly rather than
  * navigating the route there — a real simplification (Dashboard's own
- * routing-owns-selection rule, 02_DASHBOARD_AND_NAV.md), acceptable for now
+ * routing-owns-selection rule), acceptable for now
  * since the alternative is wiring cross-cutting router navigation from
  * inside the chat pane; worth revisiting if it proves confusing in
  * practice.
@@ -87,6 +87,7 @@ export function ChatHistoryList({
           <div className="flex items-center justify-between gap-2">
             {renamingId === session.id ? (
               <input
+                // biome-ignore lint/a11y/noAutofocus: rendered only after the user clicks the per-row "Rename" pencil button, which sets renamingId; the input replaces the row title and must take focus so the rename can be typed immediately.
                 autoFocus
                 value={draftTitle}
                 onChange={(e) => setDraftTitle(e.target.value)}

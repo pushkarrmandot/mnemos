@@ -32,7 +32,7 @@ export interface ChatStreamChannel {
 }
 
 /**
- * Chat stream plumbing (LLD-10 §5.3).
+ * Chat stream plumbing.
  *
  * **Not a hook, by design.** The `Channel` and its batcher are owned by the
  * send mutation — created in `onMutate` — not by the chat pane's mount.
@@ -48,11 +48,11 @@ export interface ChatStreamChannel {
  * `error`) — **not** in the send mutation's `onSettled`. `onSettled` fires
  * as soon as `chat_send_prompt`'s invoke resolves, which is as soon as the
  * turn is *enqueued* (`chat.rs`'s `send_prompt` returns immediately; the
- * actual response streams back over a detached task) — disposing there used
- * to silently drop every `token_delta` for the rest of the response, since
- * a disposed batcher's `push()` is a no-op. `clientId` is threaded through
- * so the same terminal event can also garbage-collect this turn's outbox
- * entry (§2.3.3 of the chat backend design doc) — the user's message is
+ * actual response streams back over a detached task) — disposing there
+ * would silently drop every `token_delta` for the rest of the response,
+ * since a disposed batcher's `push()` is a no-op. `clientId` is threaded
+ * through so the same terminal event can also garbage-collect this turn's
+ * outbox entry — the user's message is
  * already durably journaled by the time either `complete` or `error`
  * arrives (`chat.rs` journals it before dispatching the prompt), so both a
  * clean completion and a turn-level failure confirm it. Retry is only for
@@ -64,15 +64,13 @@ export interface ChatStreamChannel {
  * every local-store lookup (`appendDelta`, `completeTurn`, ...), which are
  * all keyed by it. It is **not** the backend session id `MessageList.tsx`
  * actually reads durable history from (`qk.chat(resolvedSessionId)`, a
- * different string). A real bug here previously invalidated
- * `qk.chat(localKey)` on the terminal event — a cache entry nothing ever
- * reads — so the durable-history query was never refreshed when a turn
- * finished; the outbox bubble was also never deduped against it
- * (`MessageList.tsx`), so the message could render twice for a moment
- * whenever some *other*, unrelated refetch happened to land the durable
- * copy before the outbox entry was confirmed, and only self-corrected once
- * something else (e.g. reopening from history) forced a fresh fetch.
- * `setResolvedSessionId` fixes this: `useSendPrompt.ts`'s `onSuccess`
+ * different string) — invalidating `qk.chat(localKey)` on the terminal
+ * event instead would invalidate a cache entry nothing ever reads, leaving
+ * the durable-history query stale when a turn finishes and the outbox
+ * bubble undeduped against it (`MessageList.tsx`), so the message could
+ * render twice for a moment whenever some *other*, unrelated refetch
+ * happened to land the durable copy before the outbox entry was confirmed.
+ * `setResolvedSessionId` avoids this: `useSendPrompt.ts`'s `onSuccess`
  * calls it with the real id the moment the send ack carries it — always
  * before this turn's terminal event, since a full turn takes far longer
  * than the initial enqueue round trip — so `complete`/`error` below can
@@ -161,7 +159,7 @@ export function makeChatStreamChannel(
         // `runner_blocked` carries copy written for the user (Rust's
         // `AppError::RunnerBlocked` Display is the bare message); every
         // other kind only has `describeError`'s developer-facing one-liner,
-        // which is still better than the nothing that used to render here.
+        // which is still better than rendering nothing.
         chat().failTurn(
           localKey,
           turnId,

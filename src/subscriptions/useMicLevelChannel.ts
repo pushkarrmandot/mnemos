@@ -4,7 +4,7 @@ import { rafBatcher } from "@/lib/rafBatcher";
 import { useRecordingStore } from "@/stores/recording";
 
 /**
- * 100 ms level samples → `useRecordingStore.setLevels` (LLD-10 §5.2).
+ * 100 ms level samples → `useRecordingStore.setLevels`.
  *
  * Only the last sample of each frame survives: a level is a scalar, so older
  * samples in the same frame are already invisible by the time React renders.

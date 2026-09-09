@@ -1,6 +1,6 @@
-//! W13a's opt-in live proof: a real `claude` CLI process, given a real
+//! Opt-in live proof: a real `claude` CLI process, given a real
 //! `--mcp-config` pointing at the real built `mnemos-mcp-server` binary
-//! (`CARGO_BIN_EXE_mnemos-mcp-server`, same seam
+//! (`CARGO_BIN_EXE_mnemos_mcp_server`, same seam
 //! `tests/mcp_server_integration.rs` uses), asked a Project-scope question
 //! against real seeded data, actually calls the `mnemos.list_action_items`
 //! MCP tool and gets a real answer back — the exact path
@@ -56,6 +56,7 @@ async fn seed(dir: &std::path::Path) -> String {
                 action_items: vec![NewActionItem {
                     text: "Send updated BOM to procurement".into(),
                     assignee_hint: Some("Sam".into()),
+                    assignee_is_self: false,
                     due_hint: Some("next Friday".into()),
                     source_ts: Some(1_700_000_500),
                 }],
@@ -63,11 +64,13 @@ async fn seed(dir: &std::path::Path) -> String {
                     statement: "Target retail price is 25 EUR".into(),
                     quote: None,
                     decided_by_hint: Some("Priya".into()),
+                    decided_by_is_self: false,
                     source_ts: Some(1_700_000_600),
                 }],
                 open_questions: vec![NewOpenQuestion {
                     question: "Can we hit 25 EUR with a backlit remote?".into(),
                     raised_by_hint: Some("Sam".into()),
+                    raised_by_is_self: false,
                     source_ts: Some(1_700_000_700),
                 }],
                 bookmarks: vec![],
@@ -92,8 +95,9 @@ async fn chat_project_scope_calls_the_real_mnemos_mcp_server_and_gets_a_real_ans
     let dir = tempfile::tempdir().unwrap();
     let project_id = seed(dir.path()).await;
 
-    let mcp_server_bin = env!("CARGO_BIN_EXE_mnemos-mcp-server");
+    let mcp_server_bin = env!("CARGO_BIN_EXE_mnemos_mcp_server");
     let config = RunnerConfig {
+        resume: None,
         model: "claude-sonnet-5".to_string(),
         timeout_ms: Some(60_000),
         // Mirrors commands::chat::build_runner_config's Project-scope
@@ -121,7 +125,6 @@ async fn chat_project_scope_calls_the_real_mnemos_mcp_server_and_gets_a_real_ans
             content: vec![UserContent::Text(
                 "What are my open action items? Use the mnemos tools.".to_string(),
             )],
-            history: vec![],
             turn_id: None,
         })
         .await

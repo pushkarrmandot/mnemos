@@ -10,7 +10,7 @@ export type {
 export { mintOutboxEntry, pendingForSession } from "./outbox";
 
 /**
- * Per-session in-flight chat state (LLD-10 §3.3).
+ * Per-session in-flight chat state.
  *
  * Only the *currently streaming* turn lives here. Finished turns render from
  * the `["chat", sessionId]` Query cache — on `complete` the buffer is cleared
@@ -19,13 +19,11 @@ export { mintOutboxEntry, pendingForSession } from "./outbox";
  *
  * `addToolDisclosure`/`enqueueApproval` below take the real generated
  * `AgentEvent` (wire shape: snake_case fields, e.g. `call_id`/`tool_name`)
- * directly — there used to be a second, hand-rolled `AgentEventLite` type
- * here with camelCase field names that `useChatStreamChannel.ts` was
- * (incorrectly) typed against instead of the real one, which meant every
- * field read off a live event silently returned `undefined`. Deleted rather
- * than fixed-in-place: a duplicate wire-shape type is exactly the kind of
- * drift that caused the bug, so there is now exactly one `AgentEvent` type
- * in the codebase, imported from `@bindings`.
+ * directly, imported from `@bindings` — never a hand-rolled duplicate with
+ * different (e.g. camelCase) field names. A second wire-shape type here
+ * that drifts from the real one is exactly the kind of bug where every
+ * field read off a live event silently returns `undefined`, so there is
+ * intentionally exactly one `AgentEvent` type in the codebase.
  */
 
 export interface ToolDisclosure {
@@ -53,10 +51,10 @@ export interface PerSessionState {
   draftInput: string;
   /**
    * Why the last turn failed, shown as a persistent notice above the
-   * composer. A turn that dies mid-stream used to surface *nothing* — no
-   * toast, no rendered error (`MessageList` has no branch for a failed
-   * turn) — so the response simply stopped and the user was left guessing.
-   * Cleared when the next turn starts.
+   * composer — necessary because a turn that dies mid-stream otherwise
+   * surfaces *nothing* (no toast, and `MessageList` has no branch for a
+   * failed turn), leaving the response simply stopped and the user
+   * guessing. Cleared when the next turn starts.
    */
   lastError: { kind: string; message: string } | null;
 }
@@ -272,8 +270,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   retryOutbox: (clientId) => {
     const entry = get().outbox.find((candidate) => candidate.clientId === clientId);
     if (!entry) return null;
-    // Same `clientId` — Rust dedupes the journal write if the first attempt
-    // already landed (LLD-10 §8.4, flagged as an LLD-07 responsibility).
+    // Reuses the `clientId`, but nothing dedupes on it — the backend has
+    // never looked at it. What makes a retry safe is that a *failed* send
+    // is one the backend never accepted, plus `NewChat`'s idempotency on
+    // the session id, so retrying a chat's first message lands in the same
+    // chat rather than creating a second one. `ChatPane`'s retry path
+    // discards and re-sends rather than coming through here.
     set((state) => ({
       outbox: patchOutbox(state.outbox, clientId, { status: "pending", errorKind: undefined }),
     }));

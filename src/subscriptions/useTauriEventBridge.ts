@@ -5,10 +5,11 @@ import { events } from "@/ipc/events";
 import { router } from "@/lib/router";
 import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
+import { useConversationPipelineStore } from "@/stores/conversationPipeline";
 import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
-/** Human copy per LLD-03 §9's failure-mode table. */
+/** Human copy for each recording-warning failure mode. */
 const RECORDING_WARNING_COPY: Record<string, { title: string; body: string }> = {
   mic_disconnected: {
     title: "Recording ended unexpectedly",
@@ -22,9 +23,9 @@ const RECORDING_WARNING_COPY: Record<string, { title: string; body: string }> = 
     title: "Recording stopped — disk full",
     body: "Your disk ran out of space. What we captured before that is saved.",
   },
-  // W17b — 12_CORNER_CASES.md "Permissions" §If user revokes AFTER
-  // onboarding, Microphone row: "Recording fails immediately with toast:
-  // 'Mic access revoked — grant it in System Settings.'"
+  // If the user revokes mic access after onboarding: "Recording fails
+  // immediately with toast: 'Mic access revoked — grant it in System
+  // Settings.'"
   mic_permission_revoked: {
     title: "Mic access revoked",
     body: "Recording stopped automatically. What we captured before that is saved.",
@@ -32,13 +33,17 @@ const RECORDING_WARNING_COPY: Record<string, { title: string; body: string }> = 
 };
 
 /**
- * Every `events.*` listener in the app, in one place (LLD-10 §6, FRONTEND §2).
- * Mounted exactly once, from `App.tsx`.
+ * Every `events.*` listener in the app, in one place. Mounted exactly once,
+ * from `App.tsx`.
  *
- * Invalidate vs. `setQueryData`: if the payload **is** the new state (pipeline
- * progress), write it into the cache — no round-trip. If the payload is only a
- * "something changed" signal (`conversationReady`, `contactUpdated`),
- * invalidate and let the query refetch on subscribe.
+ * Invalidate vs. `setQueryData`: if the payload is only a "something changed"
+ * signal (`conversationReady`, `contactUpdated`), invalidate the query cache
+ * and let it refetch on subscribe. `processingProgress` is the one payload
+ * that *is* the new state rather than a signal to go re-fetch it — it writes
+ * straight into `useConversationPipelineStore`, a small Zustand store, not
+ * the query cache; see that store's doc comment for why a live, ephemeral,
+ * single-owner value like this belongs in a store rather than repurposing
+ * React Query's cache as a pub/sub channel.
  */
 export function useTauriEventBridge(): void {
   useEffect(() => {
@@ -77,15 +82,21 @@ export function useTauriEventBridge(): void {
 
         // Only the session this event belongs to may reset the store. A late
         // event for a prior recording must not clobber the current one — the
-        // re-entrant arm guard in LLD-10 §3.2 depends on this check.
+        // re-entrant arm guard depends on this check.
         const recording = useRecordingStore.getState();
         if (recording.state === "transcribing" && recording.conversationId === conversationId) {
           recording.reset();
         }
+        // Same guard, same reason, for the live-progress slot the pipeline
+        // just finished with — see `stores/conversationPipeline.ts`.
+        const pipeline = useConversationPipelineStore.getState();
+        if (pipeline.conversationId === conversationId) {
+          pipeline.reset();
+        }
       }),
 
       events.processingProgress.listen(({ payload }) => {
-        queryClient.setQueryData(qk.conversationPipeline(payload.conversation_id), payload);
+        useConversationPipelineStore.getState().setProgress(payload);
         // Each step transition writes new data behind `get_conversation_detail`
         // (transcript.json after "transcribing", summary/action items after
         // "extracting") — refetch so Conversation Detail can render that step's
@@ -151,7 +162,7 @@ export function useTauriEventBridge(): void {
       // recording store learns the same thing from its first live chunk.
       events.warmupComplete.listen(() => {}),
 
-      // Gap #6 (LLD-03 §9 failure modes #1/#2). The backend has already
+      // The backend has already
       // moved this recording to STOPPING by the time this arrives (it's
       // emitted just before that transition) — this listener only owns the
       // UI-visible side: a sticky toast with a "View partial" affordance
@@ -164,7 +175,7 @@ export function useTauriEventBridge(): void {
           title: "Recording ended unexpectedly",
           body: payload.message || "What we captured is saved.",
         };
-        // W17b: permission revocation needs "fix the actual problem" (open
+        // Permission revocation needs "fix the actual problem" (open
         // System Settings), not "go look at what we captured" — every other
         // kind here keeps the original "View partial" action.
         const isPermissionRevoked = payload.kind === "mic_permission_revoked";
@@ -183,9 +194,29 @@ export function useTauriEventBridge(): void {
               },
           ttlMs: 0,
         });
+
+        // The backend has already fully torn this recording down by the
+        // time this event arrives (session removed, sidecar/capture
+        // stopped) — but the local store doesn't know that on its own. It
+        // only ever leaves "recording" via the explicit Stop flow
+        // (`markStopping`/`markFinalizing`/`markTranscribing`, all called
+        // from `useRecordingMutations`'s stop mutation), which never runs
+        // on this backend-initiated path. Left alone, the store stays
+        // parked in "recording" with a `sessionId` the backend no longer
+        // has: every button gated on `state === "idle"` (Start New
+        // Recording included) stays disabled, and a Stop click fails with
+        // "session not found" — the window is stuck until the app is
+        // fully quit and relaunched. Same "only the active session may
+        // reset the store" guard as the `conversationReady` listener
+        // above, so a late/stale event can't clobber a different, still-
+        // live recording.
+        const recording = useRecordingStore.getState();
+        if (recording.conversationId === payload.conversation_id) {
+          recording.reset();
+        }
       }),
 
-      // W17b: only meaningful for whichever conversation this window's
+      // Only meaningful for whichever conversation this window's
       // local session is actively recording — a second window/a stale
       // event for an already-stopped session is a harmless no-op.
       events.liveTranscriptionWarmup.listen(({ payload }) => {

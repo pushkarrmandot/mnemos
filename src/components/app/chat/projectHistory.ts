@@ -4,8 +4,7 @@ import type { ToolDisclosure } from "@/stores/chat";
 /**
  * A rendered chat message — `MessageList`'s render contract. Historical
  * messages come from `projectHistory` below; the currently-streaming turn is
- * still rendered separately from the live store (`stores/chat`), same as
- * before — this only replaces the permanent `[]` `getSessionHistory` stub.
+ * rendered separately, from the live store (`stores/chat`).
  */
 export interface Message {
   id: string;
@@ -14,18 +13,22 @@ export interface Message {
   /** Unix ms. */
   timestamp: number;
   toolDisclosures?: ToolDisclosure[];
+  /** Set when the turn ended in failure — rendered as an inline card so a
+   * turn that died mid-stream doesn't just stop with nothing shown. */
+  error?: string;
 }
 
 /**
- * Projects a session's raw `chat_journal` rows (design doc §2.3.1) into the
+ * Projects a session's raw `chat_journal` rows (`ChatEventRecord`: `seq`,
+ * `ts`, and an `event_json` payload) into the
  * `Message[]` shape `MessageList` renders. Deliberately a **separate**
  * function from the live-stream event handling in `useChatStreamChannel.ts`
  * — not a shared "one reducer for replay and live" — because the journal
  * carries events (`complete`, `notice`, `error`) that are pure control
  * signal for a live turn but have no render meaning once historical (and
  * whose side effects, like toasting a past `notice` or invalidating a query
- * on a stale `complete`, must never re-fire on replay). See the design
- * doc's §2.3 for why the two were kept apart on purpose.
+ * on a stale `complete`, must never re-fire on replay). That's why the two
+ * are kept apart on purpose.
  *
  * Pure and synchronous: no side effects, easy to unit-test by feeding a
  * recorded journal and asserting the `Message[]` it produces (mirrors the
@@ -75,12 +78,14 @@ export function projectHistory(records: readonly ChatEventRecord[]): Message[] {
         });
         break;
       }
-      case "token_delta": {
+      // The whole reply, in one row. Deltas are streamed live and never
+      // journaled, so this — not an accumulation of fragments — is what a
+      // finished assistant turn looks like on disk.
+      case "assistant_message": {
         const turnId = readString(event, "turn_id");
-        const text = readString(event, "text");
         if (!turnId) break;
         const message = assistantMessageFor(turnId, tsMs);
-        message.text += text;
+        message.text = readString(event, "text");
         break;
       }
       case "tool_call": {
@@ -113,9 +118,22 @@ export function projectHistory(records: readonly ChatEventRecord[]): Message[] {
         );
         break;
       }
-      // `notice`/`complete`/`error`/`approval_request` (and anything
-      // unrecognized, forwards-compat with a future runner's events): pure
-      // control signal for a *live* turn, no render meaning once historical.
+      // Attaches to a bubble that already exists, never creates one: a
+      // turn that failed before producing anything has nothing to render
+      // here (the live path surfaces that through the composer's error
+      // notice instead), and an empty bubble carrying only an error reads
+      // as a broken reply.
+      case "error": {
+        const turnId = readString(event, "turn_id");
+        const index = turnId ? turnMessageIndex.get(turnId) : undefined;
+        if (index === undefined) break;
+        const message = messages[index];
+        if (message) message.error = readString(event, "message");
+        break;
+      }
+      // `notice`/`complete`/`approval_request` (and anything unrecognized,
+      // forwards-compat with a future runner's events): pure control signal
+      // for a *live* turn, no render meaning once historical.
       default:
         break;
     }

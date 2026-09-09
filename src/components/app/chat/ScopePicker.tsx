@@ -6,6 +6,7 @@ import { cn } from "@/lib/cn";
 import { conversationFilter, conversationScopeKey } from "@/queries/conversationFilter";
 import { qk } from "@/queries/keys";
 import type { ChatScope } from "./chatScope";
+import { ScopeLabel } from "./ScopeLabel";
 
 /** One screenful. The search box narrows further; this is not a browse
  * surface, so there is no reveal control. */
@@ -73,24 +74,12 @@ export function ScopePicker({
     limit: SCOPE_PICKER_LIMIT,
   });
   const { data: conversationPage } = useQuery({
-    queryKey: qk.conversationsPage(conversationScopeKey(convFilter)),
+    queryKey: qk.conversationsLookup(conversationScopeKey(convFilter)),
     queryFn: () => commands.listConversations(convFilter),
     enabled: open,
   });
   const conversations = conversationPage?.items ?? [];
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
-
-  const currentProject = scope.projectId ? projects.find((p) => p.id === scope.projectId) : null;
-  const currentConversation = scope.conversationId
-    ? conversations.find((c) => c.id === scope.conversationId)
-    : null;
-  const label = currentConversation
-    ? `Conversation: ${currentConversation.title}`
-    : currentProject
-      ? `Project: ${currentProject.name}`
-      : scope.projectId || scope.conversationId
-        ? "Loading…" // resolved id, name not fetched yet
-        : "Everything";
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q ? projects.filter((p) => p.name.toLowerCase().includes(q)) : projects;
@@ -115,7 +104,11 @@ export function ScopePicker({
         className="flex items-center gap-1.5 rounded-full border border-subtle bg-subtle px-2.5 py-1 text-xs hover:bg-hover"
       >
         <span className="size-1.5 rounded-full bg-accent-primary" />
-        <span className="max-w-[180px] truncate text-secondary">{label}</span>
+        {/* Shares `<ScopeLabel>`'s lookup rather than reading the dropdown's
+            own lists: those are `enabled: open`, so a closed picker had no
+            names to resolve and the chip read "Loading…" forever for any
+            project- or conversation-scoped chat. */}
+        <ScopeLabel bare scope={scope} />
         <ChevronDown className="size-3 text-tertiary" />
       </button>
 

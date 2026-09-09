@@ -23,11 +23,17 @@ import { type ChatScope, scopeKey, scopeToInput } from "./chatScope";
  * Returns the full session (not just the id) so the header can show/rename
  * its title without a second round trip.
  */
-export function useResolvedSession(scope: ChatScope): ChatSession | null {
+export function useResolvedSession(scope: ChatScope): {
+  session: ChatSession | null;
+  /** Still asking. `session === null` while pending means "don't know yet",
+   * not "this scope has no chats" — the difference decides whether the pane
+   * should open a fresh chat. */
+  isPending: boolean;
+} {
   const key = scopeKey(scope);
   const selectChatSession = useSelectionStore((s) => s.selectChatSession);
 
-  const { data } = useQuery({
+  const { data, isPending } = useQuery({
     queryKey: qk.chatResolvedSession(key),
     queryFn: () => commands.chat.resolveSession(scopeToInput(scope)),
   });
@@ -39,15 +45,17 @@ export function useResolvedSession(scope: ChatScope): ChatSession | null {
     selectChatSession(session?.id ?? null);
   }, [session?.id]);
 
-  return session;
+  return { session, isPending };
 }
 
-/** Called from a send mutation's success handler — the other half of "how
- * `chatSessionId` gets set" (see this file's top doc comment). Invalidates
- * rather than hand-constructing a `ChatSession` from the ack's bare
- * `{session_id}` — the real row (title, timestamps, ...) is one cheap fetch
- * away and correct by construction; a guessed stand-in isn't. */
-export function adoptResolvedSession(scope: ChatScope, sessionId: string): void {
+/** Called from a send mutation's success handler. Invalidates rather than
+ * hand-constructing a `ChatSession` from the ack's bare `{session_id}` —
+ * the real row (title, timestamps, ...) is one cheap fetch away and correct
+ * by construction; a guessed stand-in isn't. */
+export function adoptResolvedSession(sessionId: string): void {
   useSelectionStore.getState().selectChatSession(sessionId);
-  queryClient.invalidateQueries({ queryKey: qk.chatResolvedSession(scopeKey(scope)) });
+  // Both the scope's default-open target and the history list changed: the
+  // first send is what creates a chat's row.
+  queryClient.invalidateQueries({ queryKey: qk.chatResolvedSessionAll() });
+  queryClient.invalidateQueries({ queryKey: qk.chatSessions() });
 }

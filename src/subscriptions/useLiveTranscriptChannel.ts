@@ -16,14 +16,15 @@ function toTurn(chunk: TranscriptChunk): TranscriptTurn {
 }
 
 /**
- * Live-ASR stream → `useRecordingStore.appendTranscript` (LLD-10 §5.1).
+ * Live-ASR stream → `useRecordingStore.appendTranscript`.
  *
  * Mounted at shell scope (`AppShell`), never by the transcript view: tearing
  * this down unsubscribes the Rust-side forwarding task, and any chunk the
- * worker emits while it's down is dropped for good. It used to live in
- * `LiveTranscriptStream`, which only mounts on `/recording` — so navigating
- * away mid-recording silently lost every turn spoken while you were gone.
- * They reappeared only in the final transcript, which is transcribed from the
+ * worker emits while it's down is dropped for good. It's mounted independent
+ * of `LiveTranscriptStream`, which only mounts on `/recording` — mounting it
+ * there instead would silently lose every turn spoken while you navigated
+ * away mid-recording. Those turns would reappear only in the final
+ * transcript, which is transcribed from the
  * WAV and never depended on this stream. `null` sessionId means "no
  * recording" and subscribes to nothing.
  */
@@ -38,7 +39,7 @@ export function useLiveTranscriptChannel(sessionId: number | null): void {
     channel.onmessage = batcher.push;
 
     streamCommands.subscribeTranscript(sessionId, channel).catch((error: unknown) => {
-      // W17b: a session that's simply *gone* is a benign teardown race, not a
+      // A session that's simply *gone* is a benign teardown race, not a
       // failure worth interrupting anyone over — `stop_recording` removes the
       // session from the registry before the UI has finished unmounting the
       // live screen, so a late (re)subscribe legitimately misses it. Toasting

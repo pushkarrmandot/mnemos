@@ -6,74 +6,84 @@ import { commands } from "@/ipc/client";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { qk } from "@/queries/keys";
-import { EMPTY_SESSION, type OutboxEntry, useChatStore } from "@/stores/chat";
+import { EMPTY_SESSION, type OutboxEntry, pendingForSession, useChatStore } from "@/stores/chat";
 import { useUIStore } from "@/stores/ui";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { type Message, projectHistory } from "./projectHistory";
 import { ToolDisclosureRow } from "./ToolDisclosureRow";
 
 /**
- * Message list component (06_CHAT.md §5).
+ * Message list component.
  * Renders history (via `projectHistory`) + any streaming in-flight turn +
  * pending/failed outbox entries.
  *
- * `localKey` (live/local state — outbox, in-flight turn) and
- * `resolvedSessionId` (backend id — history fetch) are deliberately
- * separate props, not one `sessionId` — see `chatScope.ts`'s doc comment
- * for why: the backend id isn't known until a resolve query or a send's ack
- * completes, but local state needs a key immediately.
+ * One `sessionId` drives both halves. It used to be two props — a
+ * scope-derived local key plus a backend id — because the backend id was
+ * unknown until a send's ack. The frontend now mints the id, so live state
+ * and durable history are keyed by the same string from the first
+ * keystroke.
  */
 export function MessageList({
-  localKey,
-  resolvedSessionId,
+  sessionId,
   onRetry,
 }: {
-  localKey: string;
-  resolvedSessionId: string | null;
+  /** The chat on screen. `null` before any chat exists for this scope. */
+  sessionId: string | null;
   /** Re-sends a failed outbox entry's text as a brand-new message — see
    * `ChatPane.tsx`. Not wired to the store's `retryOutbox` clientId-reuse
-   * path: nothing on the backend dedupes by clientId yet (LLD-10 §8.4 is
-   * flagged there as unimplemented), so reusing the id would risk a silent
-   * duplicate if the first attempt actually landed. A fresh send is safe
-   * either way. */
+   * path: nothing on the backend dedupes by clientId yet, so reusing the id
+   * would risk a silent duplicate if the first attempt actually landed. A
+   * fresh send is safe either way. */
   onRetry: (entry: OutboxEntry) => void;
 }) {
+  // `sessionId` is null only for the frame before the scope's resolve
+  // query settles (`ChatPane` opens a fresh chat if it comes back empty).
+  // Store lookups still need a key for that frame; no chat can have an
+  // empty id, so this reads as "no session" everywhere it's used.
+  const key = sessionId ?? "";
+
   const containerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pushToast = useUIStore((s) => s.pushToast);
 
   // Get in-flight turn state
-  const inFlightTurnId = useChatStore((s) => s.bySession[localKey]?.inFlightTurnId ?? null);
-  const streamingText = useChatStore((s) => s.bySession[localKey]?.streamingText ?? "");
+  const inFlightTurnId = useChatStore((s) => s.bySession[key]?.inFlightTurnId ?? null);
+  const streamingText = useChatStore((s) => s.bySession[key]?.streamingText ?? "");
   // `?? EMPTY_SESSION.toolDisclosures` — NOT `?? []`. A fresh `[]` literal on
   // every selector call defeats useSyncExternalStore's snapshot-equality
   // check (Zustand v5) and causes an infinite re-render loop ("Maximum
   // update depth exceeded"); EMPTY_SESSION's array is a stable reference.
   const toolDisclosures = useChatStore(
-    (s) => s.bySession[localKey]?.toolDisclosures ?? EMPTY_SESSION.toolDisclosures,
+    (s) => s.bySession[key]?.toolDisclosures ?? EMPTY_SESSION.toolDisclosures,
   );
-  const scrollAnchor = useChatStore((s) => s.bySession[localKey]?.scrollAnchor ?? "bottom");
+  const scrollAnchor = useChatStore((s) => s.bySession[key]?.scrollAnchor ?? "bottom");
   const setScrollAnchor = useChatStore((s) => s.setScrollAnchor);
   const outbox = useChatStore((s) => s.outbox);
   const discardOutbox = useChatStore((s) => s.discardOutbox);
-  const sessionOutbox = outbox.filter((entry) => entry.sessionId === localKey);
+  // `sessionOutbox` is derived below, once `messages` (the durable history
+  // it dedupes against) is in scope.
 
-  // Fetch chat history — real now (was a hardcoded `[]` stub): journal rows
+  // Fetch chat history: journal rows
   // in, rendered messages out via `projectHistory`. Gated on the backend id
   // being resolved; a brand-new scope with nothing sent yet has none, which
   // is correctly "no history" rather than an error.
   const { data: messages = [] } = useQuery({
-    queryKey: qk.chat(resolvedSessionId ?? ""),
+    queryKey: qk.chat(key),
     queryFn: async () => {
-      if (!resolvedSessionId) return [];
-      const records = await commands.chat.getSessionHistory(resolvedSessionId, {
+      if (!sessionId) return [];
+      const records = await commands.chat.getSessionHistory(sessionId, {
         beforeSeq: null,
         limit: 200,
       });
       return projectHistory(records);
     },
-    enabled: !!resolvedSessionId,
+    enabled: !!sessionId,
   });
+
+  // Hide any optimistic bubble whose text has already landed in the durable
+  // history, so the user's first message doesn't render twice (once from the
+  // outbox, once from history) while the turn is still streaming.
+  const sessionOutbox = pendingForSession(outbox, key, messages);
 
   // Auto-scroll to bottom when streaming
   // biome-ignore lint/correctness/useExhaustiveDependencies: streamingText is the intentional re-scroll trigger on every streamed chunk, not a value read in the effect
@@ -88,9 +98,9 @@ export function MessageList({
     const el = e.currentTarget;
     const isAtBottom = Math.abs(el.scrollHeight - el.scrollTop - el.clientHeight) < 50;
     if (!isAtBottom && scrollAnchor === "bottom") {
-      setScrollAnchor(localKey, "manual");
+      setScrollAnchor(key, "manual");
     } else if (isAtBottom && scrollAnchor === "manual") {
-      setScrollAnchor(localKey, "bottom");
+      setScrollAnchor(key, "bottom");
     }
   };
 
@@ -123,14 +133,13 @@ export function MessageList({
 
       {/* Pending/in-flight/failed outbox entries — the user's own just-sent
        * message, rendered immediately instead of waiting for the next
-       * history refetch (the message the outbox already always tracked, but
-       * that nothing ever rendered). Rendered *before* the in-flight turn
+       * history refetch. Rendered *before* the in-flight turn
        * block below, not after: conversation order is "I ask, then Claude
-       * answers" — rendering the outbox bubble last put the user's own
+       * answers" — rendering the outbox bubble last would put the user's own
        * message visually *below* the assistant's in-progress response while
-       * streaming, which read as backwards (and self-corrected once the
-       * turn finished and everything came from durable history in the
-       * right order, which is what made it easy to miss). */}
+       * streaming, which reads as backwards (a mistake that's easy to miss
+       * because it self-corrects once the turn finishes and everything
+       * comes from durable history in the right order). */}
       {sessionOutbox.map((entry) => (
         <OutboxBubble
           key={entry.clientId}
@@ -179,6 +188,14 @@ function MessageBubble({ message, onCopy }: { message: Message; onCopy: (text: s
         ) : (
           <div className="whitespace-pre-wrap break-words text-sm">{message.text}</div>
         )}
+        {/* A turn that died mid-stream keeps whatever it produced *and*
+            says so, rather than looking like a reply that just stopped. */}
+        {message.error ? (
+          <p className="type-caption mt-2 flex items-center gap-1.5 text-danger">
+            <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
+            {message.error}
+          </p>
+        ) : null}
         <Button
           size="icon"
           variant="ghost"

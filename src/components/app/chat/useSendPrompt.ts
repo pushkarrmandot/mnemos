@@ -1,6 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useRef } from "react";
 
+import type { SendTarget } from "@/ipc/client";
 import { commands } from "@/ipc/client";
 import { describeError, normalizeError } from "@/ipc/errors";
 import { ulid } from "@/lib/ulid";
@@ -10,11 +11,10 @@ import {
   type ChatStreamChannel,
   makeChatStreamChannel,
 } from "@/subscriptions/useChatStreamChannel";
-import { scopeToInput } from "./chatScope";
 import { adoptResolvedSession } from "./useResolvedSession";
 
 /**
- * Send chat prompt mutation (06_CHAT.md, LLD-10 §4.4).
+ * Send chat prompt mutation.
  *
  * Optimistic outbox: message appears immediately, reconciles with journal
  * echo. The stream channel is created in `onMutate` and disposed by
@@ -29,11 +29,11 @@ import { adoptResolvedSession } from "./useResolvedSession";
  * per-call object would go stale across any re-render in between (this
  * component re-renders on every streamed token), silently breaking both.
  *
- * `localKey` (not a backend session id) is what local state — outbox, the
- * live-turn store — is keyed by; see `chatScope.ts`'s doc comment for why:
- * the backend id isn't known yet for a scope's first-ever message, so
- * requiring it up front was a permanent deadlock. `onSuccess` below adopts
- * the real id once the ack carries it.
+ * Local state (outbox, live turn) is keyed by the **session id**, which the
+ * frontend mints for a brand-new chat rather than waiting for the backend
+ * to assign one. That is what lets a chat's local state exist from the
+ * first keystroke while still being keyed by the same id the row will have,
+ * so nothing has to be re-keyed mid-turn.
  */
 export function useSendPrompt() {
   const enqueueOutbox = useChatStore((s) => s.enqueueOutbox);
@@ -46,52 +46,43 @@ export function useSendPrompt() {
 
   const mutation = useMutation({
     mutationFn: async ({
+      target,
       text,
-      projectId,
-      conversationId,
     }: {
-      localKey: string;
+      sessionId: string;
+      target: SendTarget;
       text: string;
-      projectId: string | null;
-      conversationId: string | null;
     }) => {
       if (!channelRef.current) {
         throw new Error("Channel not initialized");
       }
-      const scope = scopeToInput({ projectId, conversationId });
-      return commands.chat.sendPrompt(scope, text, channelRef.current.channel);
+      return commands.chat.sendPrompt(target, text, channelRef.current.channel);
     },
 
-    onMutate: async ({ localKey, text }) => {
+    onMutate: async ({ sessionId, text }) => {
       // Optimistic outbox
-      const entry = enqueueOutbox(localKey, text);
+      const entry = enqueueOutbox(sessionId, text);
       markOutboxInFlight(entry.clientId);
 
       // Create turn and stream channel
       const turnId = ulid();
-      startTurn(localKey, turnId);
+      startTurn(sessionId, turnId);
 
       // Create channel for streaming — `entry.clientId` lets the channel
       // itself confirm this outbox entry on the turn's terminal event
       // (see useChatStreamChannel.ts), instead of confirming it here on
       // send-ack, which cleared the outbox long before the message was
       // actually durable/visible anywhere.
-      channelRef.current = makeChatStreamChannel(localKey, turnId, entry.clientId);
+      channelRef.current = makeChatStreamChannel(sessionId, turnId, entry.clientId);
 
       return { entry, turnId };
     },
 
-    onSuccess: (ack, { projectId, conversationId }) => {
-      // The other half of resolving `chatSessionId` (`useResolvedSession.ts`'s
-      // doc comment) — a brand-new scope's first message has nothing for the
-      // mount-time resolve query to find, so the ack is what teaches the app
-      // this scope's real backend session id.
-      adoptResolvedSession({ projectId, conversationId }, ack.session_id);
-      // Also teaches *this turn's* stream channel the real id, so its
-      // terminal event invalidates `qk.chat(ack.session_id)` — the cache
-      // entry `MessageList.tsx` actually reads — instead of a `localKey`
-      // one nothing reads (see `useChatStreamChannel.ts`'s doc comment).
-      channelRef.current?.setResolvedSessionId(ack.session_id);
+    onSuccess: (ack) => {
+      // The chat row now definitely exists (the first send is what creates
+      // it), so the scope's resolve query and the history list are both
+      // stale.
+      adoptResolvedSession(ack.session_id);
     },
 
     onError: (error, _variables, context) => {
@@ -116,7 +107,7 @@ export function useSendPrompt() {
   return {
     ...mutation,
     /**
-     * Stops the in-flight turn (design doc §2.4): tells the backend to kill
+     * Stops the in-flight turn: tells the backend to kill
      * the runner and evict it from the registry, so the *next* message in
      * this session cold-starts a fresh process instead of writing to a dead
      * one's stdin. Deliberately does not touch `channelRef` or call
@@ -126,8 +117,8 @@ export function useSendPrompt() {
      * `complete` handling as any other finished turn (clears
      * `inFlightTurnId`, disposes the batcher, confirms the outbox entry) —
      * one code path for "finished" instead of a second one for
-     * "cancelled". Takes the real backend session id (not `localKey`) —
-     * `chat_cancel_turn` only knows about backend sessions.
+     * "cancelled". Takes the session id — `chat_cancel_turn` only knows
+     * about chats that exist on the backend.
      */
     cancel: (sessionId: string, turnId: string) => {
       commands.chat.cancelTurn(sessionId, turnId).catch((error) => {

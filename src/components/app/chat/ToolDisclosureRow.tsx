@@ -12,8 +12,8 @@ export interface ToolDisclosure {
 }
 
 /**
- * Tool disclosure row (06_CHAT.md §7, Superset reference).
- * Collapsed by default, shows "Used N tools" with expand affordance.
+ * Tool disclosure row. Collapsed by default, showing only "Used N tools" —
+ * expand to see per-tool status.
  */
 export function ToolDisclosureRow({ toolDisclosures }: { toolDisclosures: ToolDisclosure[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -21,11 +21,11 @@ export function ToolDisclosureRow({ toolDisclosures }: { toolDisclosures: ToolDi
   const running = toolDisclosures.filter((t) => t.state === "running").length;
 
   return (
-    <div className="border border-subtle bg-subtle rounded px-3 py-2 space-y-2">
+    <div className="space-y-2 rounded border border-subtle bg-subtle px-3 py-2">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-xs text-tertiary hover:text-secondary cursor-pointer w-full"
+        className="flex w-full cursor-pointer items-center gap-2 text-tertiary text-xs hover:text-secondary"
       >
         <ChevronDown className={cn("size-3 transition-transform", expanded ? "rotate-180" : "")} />
         <span className="font-medium">
@@ -35,9 +35,9 @@ export function ToolDisclosureRow({ toolDisclosures }: { toolDisclosures: ToolDi
       </button>
 
       {expanded && (
-        <div className="space-y-2 border-t border-subtle pt-2">
+        <div className="space-y-2 border-subtle border-t pt-2">
           {toolDisclosures.map((disclosure) => (
-            <div key={disclosure.callId} className="text-xs space-y-1">
+            <div key={disclosure.callId} className="space-y-1 text-xs">
               <div className="flex items-center gap-2 text-tertiary">
                 {disclosure.state === "running" && (
                   <Loader className="size-3 animate-spin text-accent-primary" />
@@ -46,8 +46,8 @@ export function ToolDisclosureRow({ toolDisclosures }: { toolDisclosures: ToolDi
                 {disclosure.state === "failed" && <AlertCircle className="size-3 text-error" />}
                 <span className="font-mono">{disclosure.toolName}</span>
               </div>
-              {disclosure.summary && <p className="text-tertiary ml-5">{disclosure.summary}</p>}
-              <p className="text-tertiary ml-5">{disclosure.humanReadable}</p>
+              {disclosure.summary && <p className="ml-5 text-tertiary">{disclosure.summary}</p>}
+              <p className="ml-5 text-tertiary">{disclosure.humanReadable}</p>
             </div>
           ))}
         </div>
