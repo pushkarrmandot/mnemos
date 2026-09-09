@@ -12,9 +12,9 @@ const CLAUDE_CODE_INSTALL_URL = "https://code.claude.com/docs/en/quickstart";
 const QUERY_KEY = ["onboarding", "claudeCli"] as const;
 
 /**
- * Screen 2 — hard-gates Continue on the CLI actually being found (matches
- * `01_ONBOARDING.md` exactly: "Continue disabled until user installs and
- * re-runs detection"). Does not attempt to verify login state — see
+ * Screen 2 — hard-gates Continue on the CLI actually being found: "Continue
+ * disabled until user installs and re-runs detection." Does not attempt to
+ * verify login state — see
  * `RunnerKind::detect`'s doc comment (`ipc/runner/registry.rs`) for why
  * that heuristic stays out of a hard gate; a not-logged-in CLI is caught by
  * the existing runtime error path the first time it's actually used.

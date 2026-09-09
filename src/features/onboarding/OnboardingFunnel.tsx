@@ -3,7 +3,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { Shield, Users, Zap } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/app/Button";
-import { Illustration } from "@/components/app/Illustration";
+import { Logo } from "@/components/app/shell/Logo";
+import type { OnboardingStatus } from "@/ipc/client";
 import { commands } from "@/ipc/client";
 import { t } from "@/lib/i18n";
 import { toast } from "@/lib/toast";
@@ -13,7 +14,7 @@ import { PermissionsScreen } from "./PermissionsScreen";
 import { RunnerScreen } from "./RunnerScreen";
 
 /**
- * The onboarding funnel (`pages/01_ONBOARDING.md`), rendered at `/onboarding`
+ * The onboarding funnel, rendered at `/onboarding`
  * inside `<BareShell>`. State machine, not a route-per-screen: every screen
  * after Welcome re-derives its own status from real device state on mount
  * (CLI detected? permissions granted? model downloaded?) rather than reading
@@ -28,6 +29,12 @@ import { RunnerScreen } from "./RunnerScreen";
  * "which screen was I on" pointer that could drift from reality.
  */
 type Step = "splash" | "welcome" | "runner" | "permissions" | "models";
+
+/** How long to wait for the post-onboarding route swap before assuming it
+ * stalled and reloading. Long enough that a merely slow navigation is
+ * never interrupted, short enough that a genuine hang does not strand
+ * the user on a screen whose work is already committed. */
+const NAVIGATION_STALL_FALLBACK_MS = 4000;
 
 const STEP_ORDER: Step[] = ["welcome", "runner", "permissions", "models"];
 
@@ -73,8 +80,38 @@ export function OnboardingFunnel() {
     try {
       await commands.onboarding.setUserName(firstName.trim() || null, lastName.trim() || null);
       await commands.onboarding.complete();
-      await queryClient.invalidateQueries({ queryKey: qk.onboardingStatus() });
+
+      // Write the just-persisted values straight into the cache instead of
+      // `invalidateQueries` + refetch. Both commands have already returned,
+      // so the values are known — a round trip could only fetch back what
+      // we just sent. It also removes an await that gates the whole screen
+      // on an IPC call that has no timeout of its own.
+      queryClient.setQueryData(qk.onboardingStatus(), (prev: OnboardingStatus | undefined) => ({
+        ...prev,
+        has_onboarded: true,
+        user_first_name: firstName.trim() || null,
+        user_last_name: lastName.trim() || null,
+        calendar_checklist_dismissed: prev?.calendar_checklist_dismissed ?? false,
+      }));
+
       navigate({ to: "/" });
+
+      // Safety net. Onboarding is already committed at this point — the DB
+      // says `has_onboarded = true` — so the only thing left is getting off
+      // this screen. Observed in a real packaged build: everything above
+      // succeeded (verified in the DB) and the Rust side went fully idle,
+      // yet `navigate` never swapped the route, leaving "Finishing…" on
+      // screen forever with no error and no way out but force-quitting.
+      // Since the persisted state is already correct, a reload lands on the
+      // dashboard exactly the way relaunching by hand does — which is what
+      // a stuck user ends up doing anyway. Cheap insurance against any
+      // future navigation stall, whatever its cause.
+      window.setTimeout(() => {
+        if (window.location.pathname.includes("onboarding")) {
+          console.warn("[mnemos] navigation after onboarding stalled — reloading");
+          window.location.replace("/");
+        }
+      }, NAVIGATION_STALL_FALLBACK_MS);
     } catch (err) {
       // Previously an unhandled rejection here looked, from the outside,
       // exactly like a dead button — no toast, no navigation, no console
@@ -88,10 +125,11 @@ export function OnboardingFunnel() {
   // The name is what lets extraction resolve "Priya, can you send that over"
   // to the user instead of leaving every item they're mentioned in
   // unattributed — the single input this whole attribution feature depends
-  // on, so it's mandatory here rather than a courtesy field. Both exits from
-  // this screen (Continue and "I've used Mnemos before") go through this
-  // gate; a returning user still needs a name recorded even though they're
-  // skipping the rest of the funnel.
+  // on, so it's mandatory here rather than a courtesy field. There's no
+  // "I've used Mnemos before" shortcut past Runner/Permissions/Models: those
+  // are per-device, not per-person, and onboarding only ever shows on a
+  // device that hasn't completed them — a returning user still needs this
+  // device set up regardless of what they've done on another machine.
   const requireName = (proceed: () => void) => {
     if (firstName.trim()) {
       setNameError(false);
@@ -109,7 +147,7 @@ export function OnboardingFunnel() {
       {step === "splash" && (
         <div className="flex flex-1 flex-col items-center justify-center gap-8 px-6">
           <div className="flex flex-col items-center gap-4">
-            <Illustration scale="hero" slot="onboarding-hero" />
+            <Logo className="h-14" />
             <div className="text-center">
               <p className="type-display text-primary">{t("app.name")}</p>
               <p className="type-body-lg mt-1 text-secondary">{t("app.tagline")}</p>
@@ -181,14 +219,7 @@ export function OnboardingFunnel() {
             ) : null}
           </div>
 
-          <div className="mt-8 flex items-center justify-between">
-            <button
-              className="type-body text-secondary underline decoration-[var(--border-strong)] underline-offset-2 hover:text-primary"
-              onClick={() => requireName(finish)}
-              type="button"
-            >
-              {t("onboarding.skip-used-before")}
-            </button>
+          <div className="mt-8 flex items-center justify-end">
             <Button onClick={() => requireName(() => setStep("runner"))}>
               {t("onboarding.continue")}
             </Button>
