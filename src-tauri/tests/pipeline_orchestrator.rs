@@ -1,4 +1,4 @@
-//! Integration tests for W12a — the post-`stop_recording` orchestrator
+//! Integration tests for the post-`stop_recording` orchestrator
 //! chaining that `commands::recording::run_post_recording_pipeline` performs
 //! (`transcribe_final` -> `extract_conversation` -> the N=1 auto-refresh
 //! trigger -> `pipeline_step = done`). `run_post_recording_pipeline` itself
@@ -89,8 +89,8 @@ impl ReverseRpcHandler for ScriptedAgent {
 }
 
 /// Always returns an error — stands in for a real agent producing an
-/// unparseable/invalid payload, so the worker's schema validation (LLD-05
-/// §4.5's one-retry-then-fail policy) fails both attempts.
+/// unparseable/invalid payload, so the worker's schema validation (a
+/// one-retry-then-fail policy) fails both attempts.
 struct AlwaysBadAgent;
 
 #[async_trait::async_trait]
@@ -127,6 +127,7 @@ async fn fresh_service(db_path: &std::path::Path) -> SqliteStorageService {
 
 fn canned_extraction() -> Value {
     json!({
+        "title": "Short Test Recording",
         "summary_markdown": "# Overview\nA short test recording.",
         "action_items": [],
         "decisions": [],

@@ -1,14 +1,18 @@
-//! One module per feature area, mirroring `src/features/*` on the frontend
-//! (BACKEND §1). W1 shipped only the liveness probe; W9 adds `recording`.
-//! Later waves add `conversation.rs`, `project.rs`, `contact.rs`, `chat.rs`,
-//! `settings.rs`.
+//! One module per feature area, mirroring `src/features/*` on the frontend:
+//! the liveness probe here, plus `chat`, `conversation`, `meeting_detection`,
+//! `metrics`, `models`, `onboarding`, `project`, `recording`, `tray`, and
+//! `updater`.
 
 pub mod chat;
 pub mod conversation;
+pub mod meeting_detection;
 pub mod metrics;
+pub mod models;
 pub mod onboarding;
 pub mod project;
 pub mod recording;
+pub mod tray;
+pub mod updater;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -17,8 +21,9 @@ use tauri::State;
 use crate::error::AppError;
 use crate::state::AppState;
 
-/// Reply from [`ping`]. `worker_ready` is hard-coded `false` until W5 owns the
-/// Python worker handle; the field exists now so the shape doesn't change then.
+/// Reply from [`ping`]. `worker_ready` is hard-coded `false` — the field
+/// exists so the shape doesn't change if it's wired to real worker-readiness
+/// later.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct Pong {
     pub app_version: String,

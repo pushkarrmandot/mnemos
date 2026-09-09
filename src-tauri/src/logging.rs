@@ -1,5 +1,5 @@
 //! `tracing` setup: JSON lines to `~/Mnemos/logs/tauri.log`, plus a plain
-//! stderr layer in dev. No `println!` anywhere (BACKEND §7).
+//! stderr layer in dev. No `println!` anywhere.
 
 use std::path::PathBuf;
 
@@ -16,14 +16,14 @@ pub fn init(log_dir: PathBuf) -> std::io::Result<LogGuard> {
 }
 
 /// Same as [`init`] but with a caller-chosen log filename prefix — used by
-/// `mnemos-mcp-server` (W16 / LLD-08 §8) to write `mcp-server.log` instead
-/// of `tauri.log` so the two processes' logs don't interleave in one file.
+/// `mnemos-mcp-server` to write `mcp-server.log` instead of `tauri.log` so
+/// the two processes' logs don't interleave in one file.
 pub fn init_named(log_dir: PathBuf, prefix: &str) -> std::io::Result<LogGuard> {
     std::fs::create_dir_all(&log_dir)?;
 
-    // BACKEND §7 asks for 10MB size-rotation, 5 files retained.
-    // `tracing-appender` only rotates on time, so W1 ships daily rotation with a
-    // 5-file cap; swap in a size-rotating writer when log volume justifies it.
+    // Target is 10MB size-rotation, 5 files retained. `tracing-appender` only
+    // rotates on time, so this ships daily rotation with a 5-file cap instead;
+    // swap in a size-rotating writer when log volume justifies it.
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix(prefix)

@@ -1,7 +1,5 @@
--- v1 schema (LLD-01 Storage Layer §5, §7 — scoped to what v1 actually needs).
--- See product_docs/lld/LLD_01_STORAGE.md "Implementation status" for the full
--- list of what LLD-01 specifies that is intentionally NOT here yet
--- (speakers/contacts, LanceDB-adjacent bookkeeping, calendar/integrations).
+-- v1 schema, scoped to what v1 actually needs. Deliberately NOT here yet:
+-- speakers/contacts, LanceDB-adjacent bookkeeping, calendar/integrations.
 --
 -- Timestamps are unix epoch seconds, written by the application (not SQLite
 -- DEFAULT expressions) so behaviour doesn't depend on the SQLite build's
@@ -9,8 +7,10 @@
 --
 -- Pre-v1: this is the ONLY schema file. No real users yet, so schema changes
 -- are made directly here and the local dev DB is wiped and reinitialized,
--- rather than layering incremental migration files — that discipline starts
--- once v1 ships with real user data to preserve across upgrades.
+-- rather than layering incremental migration files. This stops being true
+-- the day this filename is added to `LOCKED_MIGRATIONS` in `db/mod.rs`
+-- (`migration_lock.rs` enforces it from then on) — which happens at the
+-- first real tagged release.
 
 CREATE TABLE projects (
     id          TEXT PRIMARY KEY,
@@ -67,6 +67,10 @@ CREATE TABLE action_items (
     project_id     TEXT REFERENCES projects(id) ON DELETE CASCADE,
     text           TEXT NOT NULL,
     assignee_hint  TEXT,
+    -- Is `assignee_hint` the app's own user, not a real name? Kept separate
+    -- from the hint itself so that column always holds a name or null, never
+    -- a perspective-dependent sentinel like "You" mixed in with real names.
+    assignee_is_self INTEGER NOT NULL DEFAULT 0,
     -- 'model' | 'manual'. A manual assignment must survive re-extraction and
     -- summary regeneration, which rewrite the model-derived rows; without a
     -- provenance flag there is no way to tell a correction from a guess.
@@ -74,7 +78,6 @@ CREATE TABLE action_items (
     due_hint       TEXT,
     source_ts      INTEGER,
     done           INTEGER NOT NULL DEFAULT 0,
-    dismissed      INTEGER NOT NULL DEFAULT 0,
     added_manually INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL,
@@ -93,6 +96,8 @@ CREATE TABLE decisions (
     statement       TEXT NOT NULL,
     quote           TEXT,
     decided_by_hint TEXT,
+    -- See `action_items.assignee_is_self`'s comment — same rationale.
+    decided_by_is_self INTEGER NOT NULL DEFAULT 0,
     source_ts       INTEGER,
     added_manually  INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
@@ -114,10 +119,13 @@ CREATE TABLE open_questions (
     question         TEXT NOT NULL,
     -- Who *asked*. A fact about the past, never edited.
     raised_by_hint   TEXT,
+    -- See `action_items.assignee_is_self`'s comment — same rationale.
+    raised_by_is_self INTEGER NOT NULL DEFAULT 0,
     -- Who owes the answer. Distinct from raised_by_hint and user-editable;
     -- the model never populates it in v1, so 'manual' is the only source that
     -- ever writes here today.
     owner_hint       TEXT,
+    owner_is_self    INTEGER NOT NULL DEFAULT 0,
     owner_source     TEXT NOT NULL DEFAULT 'model',
     source_ts        INTEGER,
     resolved_conv_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
@@ -130,6 +138,31 @@ CREATE TABLE open_questions (
 CREATE INDEX open_questions_conv_id ON open_questions (conv_id);
 CREATE INDEX open_questions_project_id ON open_questions (project_id);
 
+-- Items the user removed from a conversation's extracted lists.
+--
+-- Re-extraction (`replace_extraction_rows`) rebuilds every model-derived row
+-- from the transcript, so without a record of what was thrown away the model
+-- reinstates it on the next Regenerate — same transcript, same prompt, same
+-- wrong item. The row itself cannot be the record: keeping a deleted row
+-- around means every read path, present and future, has to remember to filter
+-- it out, and one of them always forgets.
+--
+-- Keyed by text because text is the only identity stable across two
+-- extractions of the same conversation (ids are minted fresh each pass). Same
+-- known limit as the manual-assignee carry-across directly above it: if the
+-- model rewords an item, the tombstone no longer matches and the reworded
+-- version returns. Losing a deletion on a reworded line beats losing every
+-- deletion on every regeneration.
+CREATE TABLE deleted_extractions (
+    conv_id    TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    -- 'action_item' | 'decision' | 'open_question', mirroring
+    -- `db::models::ExtractionKind`.
+    kind       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (conv_id, kind, text)
+) WITHOUT ROWID;
+
 CREATE TABLE bookmarks (
     id         TEXT PRIMARY KEY,
     conv_id    TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -141,50 +174,48 @@ CREATE TABLE bookmarks (
 CREATE INDEX bookmarks_conv_id ON bookmarks (conv_id);
 
 -- Journal-then-projection pattern (LLD-01 §4.4, SUPERSET §7). scope_id is
--- nullable for Everything-scope sessions. `superseded_by_id IS NULL` means
--- "this is the active session for its scope" (chat backend design doc
--- §2.5/§3): lets "New chat" open a fresh session for the same (runner,
--- scope) while keeping the old one around, instead of overwriting it.
+-- nullable for Everything-scope sessions. Any number of sessions can exist
+-- per (runner, scope) — "New chat" just inserts another row. There is no
+-- "the one active session" row to guess at: the frontend always names the
+-- exact session it means by id (`chat_send_prompt`'s `session_id`), so the
+-- backend never has to decide which of a scope's sessions a message
+-- belongs to.
+-- `runner_session_id` is the *runner's own* session id (Claude Code's
+-- `--session-id` / `--resume` value), as distinct from `id`, which is ours.
+-- Both are needed: `id` exists before any process does, `runner_session_id`
+-- only after one has started. Storing it is what makes a chat resumable
+-- across an app restart — see CHAT_REDESIGN_DESIGN.md §4.
 CREATE TABLE chat_sessions (
     id                  TEXT PRIMARY KEY,
     runner_id           TEXT,
     scope_type          TEXT NOT NULL CHECK (scope_type IN ('everything', 'project', 'conversation')),
     scope_id            TEXT,
-    session_id          TEXT,
-    epoch               TEXT NOT NULL,
-    status              TEXT NOT NULL CHECK (status IN ('active', 'idle', 'error')),
+    runner_session_id   TEXT,
     title               TEXT,
+    -- Projection only. NEVER a source of `chat_journal.seq` (that is
+    -- `MAX(seq)+1`): these count different things and tying them together
+    -- silently breaks journaling after a restart.
     message_count       INTEGER NOT NULL DEFAULT 0,
     total_input_tokens  INTEGER NOT NULL DEFAULT 0,
     total_output_tokens INTEGER NOT NULL DEFAULT 0,
     cost_micros         INTEGER NOT NULL DEFAULT 0,
-    superseded_by_id    TEXT REFERENCES chat_sessions(id),
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
 );
 
 CREATE INDEX chat_sessions_scope ON chat_sessions (scope_type, scope_id);
 
--- `COALESCE(..., '')`, not the raw columns: SQLite treats every NULL as
--- distinct from every other NULL for UNIQUE purposes, so a raw
--- `(runner_id, scope_type, scope_id)` index would silently NOT enforce
--- uniqueness for Everything scope at all (`scope_id` is always NULL there)
--- — two rapid "New chat" clicks on Everything would both succeed. Coalescing
--- to '' makes NULL a normal, comparable value for this constraint. UNIQUE
--- specifically makes two rapid "New chat" clicks for the same scope a
--- constraint violation (caught inside one transaction, start_new_session)
--- rather than a silent double-active-session race.
-CREATE UNIQUE INDEX idx_chat_sessions_scope_active
-  ON chat_sessions(COALESCE(runner_id, ''), scope_type, COALESCE(scope_id, ''))
-  WHERE superseded_by_id IS NULL;
-
+-- One row per durable item — `user_message`, `assistant_message`,
+-- `tool_call`, `error`. Deliberately NOT one row per streamed token: deltas
+-- are fragments of a thing that has a final form, and persisting the
+-- fragments meant a single reply cost hundreds of write transactions and
+-- made any bounded read window cover a fraction of one answer.
 CREATE TABLE chat_journal (
     session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-    epoch      TEXT NOT NULL,
     seq        INTEGER NOT NULL,
     ts         INTEGER NOT NULL,
     event_json TEXT NOT NULL,
-    PRIMARY KEY (session_id, epoch, seq)
+    PRIMARY KEY (session_id, seq)
 );
 
 CREATE TABLE settings (

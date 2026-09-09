@@ -1,4 +1,4 @@
-//! `StorageService` (LLD-01 §3.1) — the only path any command layer uses to
+//! `StorageService` — the only path any command layer uses to
 //! reach persistent state. Trimmed to the v1 slice: no speaker/contact
 //! methods (v1.3 diarization/contacts), no vector search (v1.2), no
 //! calendar/integrations (v1.4), no export/import (v1.1).
@@ -11,10 +11,10 @@ use sqlx::Row;
 use crate::db::models::{
     unix_now, ActionItem, ActionItemFilter, ActionItemWithSource, ChatEventRecord, ChatScopeType,
     ChatSession, Conversation, ConversationFilter, ConversationOrder, ConversationStatus, Decision,
-    DecisionFilter, ExtractionBundle, FtsHit, FtsHitKind, HintSource, NewActionItem,
-    NewChatSession, NewConversation, NewProject, OpenQuestion, OpenQuestionFilter,
-    OpenQuestionWithSource, PipelineStep, Project, ProjectActivityStat, ProjectFilter,
-    ProjectPatch,
+    DecisionFilter, DeletedExtraction, ExtractionBundle, ExtractionKind, FtsHit, FtsHitKind,
+    HintSource, NewActionItem, NewChatSession, NewConversation, NewProject, OpenQuestion,
+    OpenQuestionFilter, OpenQuestionWithSource, PipelineStep, Project, ProjectActivityStat,
+    ProjectFilter, ProjectPatch,
 };
 use crate::db::pending_deletes::{self, StuckDelete};
 use crate::db::{with_write_tx, DbPools};
@@ -23,6 +23,32 @@ use crate::fs::{atomic, paths};
 
 fn db_err(e: sqlx::Error) -> AppError {
     AppError::storage(e.to_string())
+}
+
+/// Records that `text` was removed from `conv_id`'s extracted `kind` list.
+///
+/// `INSERT OR REPLACE` rather than plain `INSERT`: deleting an item, undoing,
+/// and deleting it again is an ordinary sequence, and the primary key would
+/// reject the second delete otherwise — leaving the item deleted from the
+/// table but not suppressed, so the next regenerate would bring it back.
+async fn insert_tombstone(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conv_id: &str,
+    kind: ExtractionKind,
+    text: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO deleted_extractions (conv_id, kind, text, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(conv_id)
+    .bind(kind)
+    .bind(text)
+    .bind(unix_now())
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Escapes the three characters `LIKE` treats specially so a title filter of
@@ -82,8 +108,7 @@ fn action_item_where(filter: &ActionItemFilter) -> String {
     // `c` is a LEFT JOIN — null for a standalone item (`ai.conv_id IS NULL`).
     // The deleted-conversation check only applies when there IS a
     // conversation; a standalone item has nothing to be soft-deleted.
-    let mut sql =
-        String::from(" WHERE ai.dismissed = 0 AND (ai.conv_id IS NULL OR c.deleted_at IS NULL)");
+    let mut sql = String::from(" WHERE (ai.conv_id IS NULL OR c.deleted_at IS NULL)");
     if filter.project_id.is_some() {
         // Matches either the item's own `project_id` (standalone, scoped to
         // a project) or its conversation's (the ordinary, derived case) —
@@ -91,18 +116,23 @@ fn action_item_where(filter: &ActionItemFilter) -> String {
         sql.push_str(" AND COALESCE(ai.project_id, c.project_id) = ?");
     }
     if filter.assigned_to_me {
-        // 'You' is a fixed literal (see the field's doc comment), not a bind
-        // parameter — nothing user-controlled reaches this string.
-        sql.push_str(" AND ai.assignee_hint = 'You'");
+        sql.push_str(" AND ai.assignee_is_self = 1");
     }
-    if !filter.include_done {
-        sql.push_str(" AND ai.done = 0");
+    if filter.done.is_some() {
+        sql.push_str(" AND ai.done = ?");
     }
     if filter.since.is_some() {
-        sql.push_str(" AND COALESCE(ai.source_ts, ai.created_at) >= ?");
+        // `created_at`, not `COALESCE(source_ts, created_at)`: `source_ts` is
+        // a ms offset from the *conversation's* start (`source_timestamp_ms`
+        // — see `memory::mod`'s mapping), not a wall-clock timestamp, so it's
+        // never comparable to a `since`/`until` cutoff that means "recent in
+        // real time." Mixing them here silently excluded almost every row
+        // with a non-null `source_ts` (nearly all of them) from any
+        // recency-windowed query.
+        sql.push_str(" AND ai.created_at >= ?");
     }
     if filter.until.is_some() {
-        sql.push_str(" AND COALESCE(ai.source_ts, ai.created_at) <= ?");
+        sql.push_str(" AND ai.created_at <= ?");
     }
     sql
 }
@@ -112,6 +142,9 @@ macro_rules! bind_action_item_filter {
         let mut q = $query;
         if let Some(project_id) = &$filter.project_id {
             q = q.bind(project_id.clone());
+        }
+        if let Some(done) = $filter.done {
+            q = q.bind(done);
         }
         if let Some(since) = $filter.since {
             q = q.bind(since);
@@ -130,10 +163,13 @@ fn decision_where(filter: &DecisionFilter) -> String {
         sql.push_str(" AND COALESCE(d.project_id, c.project_id) = ?");
     }
     if filter.since.is_some() {
-        sql.push_str(" AND COALESCE(d.source_ts, d.created_at) >= ?");
+        // See `action_item_where`'s matching comment: `source_ts` is a
+        // conversation-relative ms offset, not a wall-clock time, so a
+        // recency filter has to use `created_at` alone.
+        sql.push_str(" AND d.created_at >= ?");
     }
     if filter.until.is_some() {
-        sql.push_str(" AND COALESCE(d.source_ts, d.created_at) <= ?");
+        sql.push_str(" AND d.created_at <= ?");
     }
     sql
 }
@@ -166,10 +202,13 @@ fn open_question_where(filter: &OpenQuestionFilter) -> String {
         sql.push_str(" AND oq.resolved_conv_id IS NULL");
     }
     if filter.since.is_some() {
-        sql.push_str(" AND COALESCE(oq.source_ts, oq.created_at) >= ?");
+        // See `action_item_where`'s matching comment: `source_ts` is a
+        // conversation-relative ms offset, not a wall-clock time, so a
+        // recency filter has to use `created_at` alone.
+        sql.push_str(" AND oq.created_at >= ?");
     }
     if filter.until.is_some() {
-        sql.push_str(" AND COALESCE(oq.source_ts, oq.created_at) <= ?");
+        sql.push_str(" AND oq.created_at <= ?");
     }
     sql
 }
@@ -213,10 +252,9 @@ macro_rules! bind_conversation_filter {
     }};
 }
 
-/// Shared by `open_chat_session` and `start_new_chat_session` — a
-/// Project/Conversation-scope session with no `scope_id` is meaningless
-/// (which project? which conversation?); Everything is the one scope that's
-/// legitimately global.
+/// Called by `open_chat_session` — a Project/Conversation-scope session
+/// with no `scope_id` is meaningless (which project? which conversation?);
+/// Everything is the one scope that's legitimately global.
 fn validate_chat_scope(new: &NewChatSession) -> Result<(), AppError> {
     if !matches!(new.scope_type, ChatScopeType::Everything) && new.scope_id.is_none() {
         return Err(AppError::Validation {
@@ -235,7 +273,7 @@ pub trait StorageService: Send + Sync {
     async fn get_project(&self, id: &str) -> Result<Project, AppError>;
     async fn create_project(&self, input: NewProject) -> Result<Project, AppError>;
     async fn update_project(&self, id: &str, patch: ProjectPatch) -> Result<Project, AppError>;
-    /// Enqueues the delete (LLD-01 §7). Returns as soon as the Phase 0 mark
+    /// Enqueues the delete. Returns as soon as the Phase 0 mark
     /// transaction commits; the remaining phases run via
     /// [`StorageService::resume_pending_deletes`].
     async fn delete_project(&self, id: &str) -> Result<(), AppError>;
@@ -268,7 +306,7 @@ pub trait StorageService: Send + Sync {
     /// automatically, since only the user can say whether a partial
     /// recording is worth keeping.
     async fn list_interrupted_recordings(&self) -> Result<Vec<Conversation>, AppError>;
-    /// W17b — mid-processing counterpart: a conversation can only be
+    /// The mid-processing counterpart of [`StorageService::list_interrupted_recordings`]: a conversation can only be
     /// `status = 'processing'` while a live `run_post_recording_pipeline`
     /// task holds it. A crash/force-quit before that task finishes orphans
     /// the row here forever with nothing left to publish `processing-
@@ -276,16 +314,16 @@ pub trait StorageService: Send + Sync {
     /// `list_interrupted_recordings` — the registry that would hold a live
     /// task is always empty this early.
     async fn list_stuck_processing(&self) -> Result<Vec<Conversation>, AppError>;
-    /// Conversation Detail's editable title (LLD-11 §3.2 `<EditableTitle>`).
+    /// Conversation Detail's editable title.
     /// Rejects an empty/whitespace-only title with `AppError::Validation`.
     async fn update_conversation_title(
         &self,
         id: &str,
         title: &str,
     ) -> Result<Conversation, AppError>;
-    /// Conversation Detail's persisted notes (debug-session patch — the
-    /// recording screen's `<NotesPane>` draft used to be local-only,
-    /// LLD-11 §3.1). `notes` may be empty/whitespace; unlike the title this
+    /// Conversation Detail's persisted notes — the
+    /// recording screen's `<NotesPane>` draft is saved here rather than
+    /// staying local-only. `notes` may be empty/whitespace; unlike the title this
     /// has no non-empty requirement — clearing the notes field is valid.
     async fn update_conversation_notes(
         &self,
@@ -293,7 +331,7 @@ pub trait StorageService: Send + Sync {
         notes: &str,
     ) -> Result<Conversation, AppError>;
     /// The DB half of project (re)assignment — `None` files under "no
-    /// project" (W15 design decision: always a valid, permanent choice, not
+    /// project" (always a valid, permanent choice, not
     /// a stopgap). The filesystem move (old conversation dir -> new) is the
     /// caller's job (`commands::conversation::conversation_set_project`) —
     /// this layer only guarantees the FK is valid (bad `project_id` fails
@@ -305,13 +343,13 @@ pub trait StorageService: Send + Sync {
     ) -> Result<Conversation, AppError>;
 
     // -- Structured extraction items -----------------------------------------
-    /// One transaction: every row or none (LLD-01 §4.4).
+    /// One transaction: every row or none.
     async fn bulk_insert_extraction(
         &self,
         conv_id: &str,
         items: ExtractionBundle,
     ) -> Result<(), AppError>;
-    /// LLD-05 §4.4 / §7, §10 Q6 — the re-extraction write used by
+    /// The re-extraction write used by
     /// `extracting`: one write-tx that deletes every non-manual
     /// `action_items`/`decisions`/`open_questions` row for `conv_id`,
     /// inserts the new agent output, and inserts only the agent-suggested
@@ -334,6 +372,7 @@ pub trait StorageService: Send + Sync {
         &self,
         id: &str,
         assignee_hint: Option<String>,
+        assignee_is_self: bool,
     ) -> Result<ActionItem, AppError>;
     /// Sets who owes the *answer* to an open question — never
     /// `raised_by_hint`, which records who asked and is not editable. Same
@@ -342,6 +381,7 @@ pub trait StorageService: Send + Sync {
         &self,
         id: &str,
         owner_hint: Option<String>,
+        owner_is_self: bool,
     ) -> Result<OpenQuestion, AppError>;
     /// Marks an open question answered by (or reopened from) a conversation.
     async fn set_open_question_resolved(
@@ -349,6 +389,39 @@ pub trait StorageService: Send + Sync {
         id: &str,
         resolved_conv_id: Option<&str>,
     ) -> Result<OpenQuestion, AppError>;
+
+    /// Removes one extracted item the model got wrong, and records a
+    /// tombstone so the next re-extraction doesn't reinstate it.
+    ///
+    /// Returns the row it deleted, complete, so an undo can put it back
+    /// exactly as it was — assignee, due date, quote and all. Reconstructing
+    /// it from the text alone would quietly downgrade the item every time
+    /// someone mis-clicked.
+    ///
+    /// A standalone item (no `conv_id`) gets no tombstone: nothing
+    /// re-extracts it, so there is nothing to suppress.
+    async fn delete_extraction_item(
+        &self,
+        kind: ExtractionKind,
+        id: &str,
+    ) -> Result<DeletedExtraction, AppError>;
+    /// Undo for [`Self::delete_extraction_item`] — re-inserts the row under
+    /// its original id and lifts the tombstone, so a regenerate after an undo
+    /// behaves as though the delete never happened.
+    async fn restore_extraction_item(&self, item: DeletedExtraction) -> Result<(), AppError>;
+    /// Rewrites an extracted item's text.
+    ///
+    /// Editing claims the item: the row is stamped `added_manually = 1` so
+    /// `replace_extraction_rows` stops overwriting it, and the model's
+    /// original wording is tombstoned so the next regeneration doesn't add it
+    /// back alongside the edit. Same rule the title follows — once you write
+    /// it, Mnemos stops rewriting it.
+    async fn set_extraction_text(
+        &self,
+        kind: ExtractionKind,
+        id: &str,
+        text: &str,
+    ) -> Result<(), AppError>;
     /// A user-authored action item (debug-session patch — there was no way
     /// to add one outside the extraction pipeline). Always writes
     /// `added_manually = true`, so `replace_extraction_rows`'s
@@ -368,17 +441,15 @@ pub trait StorageService: Send + Sync {
         project_id: Option<&str>,
         text: &str,
         assignee_hint: Option<&str>,
+        assignee_is_self: bool,
     ) -> Result<ActionItemWithSource, AppError>;
-    /// Reads for Conversation Detail (W12b) — no bulk-read method existed
-    /// for any of these three tables before this wave (only the write path,
-    /// `bulk_insert_extraction`/`replace_extraction_rows`, and the one
-    /// row-level `set_action_item_done`). Ordered oldest-first, matching
+    /// Reads for Conversation Detail. Ordered oldest-first, matching
     /// transcript/extraction order.
     async fn list_action_items(&self, conv_id: &str) -> Result<Vec<ActionItem>, AppError>;
     async fn list_decisions(&self, conv_id: &str) -> Result<Vec<Decision>, AppError>;
     async fn list_open_questions(&self, conv_id: &str) -> Result<Vec<OpenQuestion>, AppError>;
 
-    // -- Cross-conversation reads (W16 / LLD-08 §3.6-§3.7 `mnemos-mcp-server`
+    // -- Cross-conversation reads (`mnemos-mcp-server`
     //    tools — one joined query each, distinct from the per-conversation
     //    methods above which back Conversation Detail) ----------------------
     async fn list_action_items_global(
@@ -406,11 +477,11 @@ pub trait StorageService: Send + Sync {
 
     async fn project_activity_stats(&self) -> Result<Vec<ProjectActivityStat>, AppError>;
     /// FTS5 keyword search across conversation titles, decisions, action
-    /// items, and open questions (W16 / LLD-08 §3.2, v1 keyword-only tier —
+    /// items, and open questions (v1 keyword-only tier —
     /// no vector fusion; see the migration `500_fts5_search.sql`). Scores
     /// are raw per-table `bm25()` values, not normalized across tables —
     /// good enough to rank v1's single merged list, not a substitute for
-    /// the RRF fusion the vector tier (W14) will own.
+    /// the RRF fusion the future vector tier will own.
     async fn fts_search(
         &self,
         query: &str,
@@ -426,15 +497,39 @@ pub trait StorageService: Send + Sync {
     ) -> Result<Option<serde_json::Value>, AppError>;
 
     // -- Chat journal + projection --------------------------------------------
+    /// Creates the row for `new.id`. Idempotent: if that id already exists
+    /// the existing row is returned untouched, so a double-send or a retry
+    /// of a chat's first message cannot produce two chats.
     async fn open_chat_session(&self, new: NewChatSession) -> Result<ChatSession, AppError>;
-    /// One transaction: append to `chat_journal` AND upsert the
-    /// `chat_sessions` projection row (SUPERSET §7 journal-then-projection).
+    /// Removes a chat and (by FK cascade) its journal. Callers must evict
+    /// the live runner first — `commands::chat::chat_delete_session`.
+    async fn delete_chat_session(&self, id: &str) -> Result<(), AppError>;
+    /// The next `chat_journal.seq` for a session: `MAX(seq) + 1`, or 0.
+    ///
+    /// Read from the journal itself, never from `message_count`. They count
+    /// different things (one message vs. every durable item), so seeding a
+    /// sequence counter from the projection restarts `seq` below
+    /// `MAX(seq)` after a restart and every subsequent write fails the
+    /// `(session_id, seq)` primary key — silently, since journal write
+    /// failures are logged and swallowed.
+    async fn next_chat_seq(&self, session_id: &str) -> Result<i64, AppError>;
+    /// One transaction: append to `chat_journal` AND update the
+    /// `chat_sessions` projection row (journal-then-projection).
     async fn append_chat_event(
         &self,
         session_id: &str,
-        epoch: &str,
         seq: i64,
         event: serde_json::Value,
+    ) -> Result<(), AppError>;
+    /// Records a finished turn's token/cost totals onto the projection.
+    /// Called once per turn from the terminal event, where `Usage` is
+    /// already in hand.
+    async fn add_chat_session_usage(
+        &self,
+        id: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost_micros: i64,
     ) -> Result<(), AppError>;
     async fn read_chat_history(
         &self,
@@ -442,45 +537,47 @@ pub trait StorageService: Send + Sync {
         before_seq: Option<i64>,
         limit: u32,
     ) -> Result<Vec<ChatEventRecord>, AppError>;
-    /// Looks up the one persistent session for a `(runner_id, scope_type,
-    /// scope_id)` tuple (06_CHAT.md's "Sessions — per (runner, scope)
-    /// tuple"). `None` when no session has ever been opened for this scope
-    /// yet — the caller (`commands::chat`, W13a) then calls
-    /// `open_chat_session`. Added this wave — nothing needed a scope-keyed
-    /// lookup before `chat.send_prompt` existed.
+    /// The most recently updated session for a `(runner_id, scope_type,
+    /// scope_id)` tuple — what a scope's chat pane shows on first open.
+    /// `None` when no session has ever been opened for this scope yet —
+    /// the caller (`commands::chat`) then calls `open_chat_session`. Since
+    /// any number of sessions can exist per scope, this is a "most likely
+    /// one to resume" hint only; it is never used to decide where a
+    /// message goes (`chat_send_prompt` always takes an explicit
+    /// `session_id` for that).
     async fn find_chat_session_by_scope(
         &self,
         runner_id: Option<&str>,
         scope_type: crate::db::models::ChatScopeType,
         scope_id: Option<&str>,
     ) -> Result<Option<ChatSession>, AppError>;
-    /// Persists the runner CLI's own opaque `--session-id` onto the
-    /// `chat_sessions` row once a runner has actually started (LLD-07 §5.1
-    /// — lets a crashed session resume on the CLI's side via the same id on
-    /// a fresh spawn). Added this wave for the same reason as
-    /// `find_chat_session_by_scope`.
+    /// Fetches one session by its own id — how `chat_send_prompt` resolves
+    /// the exact session the frontend named, with no scope-guessing
+    /// involved.
+    async fn get_chat_session(&self, id: &str) -> Result<Option<ChatSession>, AppError>;
+    /// Persists the *runner's* own session id onto the `chat_sessions` row
+    /// once a runner has actually started. This is what a later cold spawn
+    /// passes to `--resume`, and therefore the whole reason a chat still
+    /// remembers itself after the app restarts.
     async fn set_chat_session_runner_session_id(
         &self,
         id: &str,
-        session_id: &str,
+        runner_session_id: &str,
     ) -> Result<(), AppError>;
-    /// "New chat" (design doc §2.5/§2.9 US-9): opens a fresh session for
-    /// `new`'s `(runner, scope)`, superseding whichever session is
-    /// currently active for it (if any) — one transaction, so there is
-    /// never a moment with two active rows for the same scope, nor an old
-    /// row left pointing at nothing. A scope with no prior session at all
-    /// behaves exactly like `open_chat_session`.
-    async fn start_new_chat_session(&self, new: NewChatSession) -> Result<ChatSession, AppError>;
-    /// `chat_sessions.title` (W13-history wave — the column existed since
-    /// `001_init.sql`, nothing had ever set it). An empty/whitespace-only
+    /// Forgets the runner's session id for this chat, after the runner
+    /// refused to resume it. The chat itself and its transcript stay; only
+    /// the pointer into the runner's own state is dropped, so the next
+    /// message starts a fresh conversation rather than retrying a session
+    /// that no longer exists.
+    async fn clear_chat_session_runner_session_id(&self, id: &str) -> Result<(), AppError>;
+    /// `chat_sessions.title`. An empty/whitespace-only
     /// title is rejected: the row already has a real way to say "no title"
     /// (`NULL`), so an empty string would just be a second, confusing
     /// spelling of the same thing.
     async fn update_chat_session_title(&self, id: &str, title: &str) -> Result<(), AppError>;
-    /// Every session — active *and* superseded (a "New chat" keeps its
-    /// predecessor around, findable here, not deleted) — newest-updated
-    /// first. `before_updated_at` paginates the same shape as
-    /// `read_chat_history`'s `before_seq`.
+    /// Every session for every scope, newest-updated first — nothing is
+    /// ever deleted from here by "New chat". `before_updated_at` paginates
+    /// the same shape as `read_chat_history`'s `before_seq`.
     async fn list_chat_sessions(
         &self,
         before_updated_at: Option<i64>,
@@ -496,12 +593,12 @@ pub trait StorageService: Send + Sync {
     ) -> Result<(), AppError>;
     async fn get_incomplete_pipelines(&self) -> Result<Vec<String>, AppError>;
     /// `None` if `conv_id` has no `pipeline_state` row yet (recording never
-    /// reached `stop_recording`'s `finalizing` write) — W12a's
+    /// reached `stop_recording`'s `finalizing` write) —
     /// `conversation.retry_step` uses this to reject a retry against a
     /// conversation whose pipeline never started.
     async fn get_pipeline_step(&self, conv_id: &str) -> Result<Option<PipelineStep>, AppError>;
     /// The `pipeline_state.error` column `get_pipeline_step` doesn't surface
-    /// — Conversation Detail's failure state (W12b) needs the message, not
+    /// — Conversation Detail's failure state needs the message, not
     /// just the `Failed` variant.
     async fn get_pipeline_error(&self, conv_id: &str) -> Result<Option<String>, AppError>;
 
@@ -515,9 +612,8 @@ pub trait StorageService: Send + Sync {
         conv_id: &str,
         json: &serde_json::Value,
     ) -> Result<(), AppError>;
-    /// Appends one line to the live `transcript.jsonl` buffer (LLD-01 §6.2
-    /// append semantics — the whole file can't be atomic-renamed while a
-    /// recording is still growing it).
+    /// Appends one line to the live `transcript.jsonl` buffer — the whole
+    /// file can't be atomic-renamed while a recording is still growing it.
     async fn append_transcript_chunk(&self, conv_id: &str, line_json: &str)
         -> Result<(), AppError>;
     async fn write_extraction(
@@ -548,7 +644,7 @@ pub trait StorageService: Send + Sync {
 /// The single `StorageService` implementation shipped in v1. Composes the
 /// split pool, the atomic-write helper, and the `pending_deletes` machinery.
 ///
-/// `Clone` (W13a addition — see `DbPools`'s doc comment): cheap, no new
+/// `Clone` (see `DbPools`'s doc comment): cheap, no new
 /// connections opened.
 #[derive(Clone)]
 pub struct SqliteStorageService {
@@ -565,8 +661,8 @@ impl SqliteStorageService {
     /// the trait: nothing outside these writers needs to fetch one item by id.
     async fn get_action_item(&self, id: &str) -> Result<ActionItem, AppError> {
         sqlx::query_as::<_, ActionItem>(
-            "SELECT id, conv_id, text, assignee_hint, assignee_source, due_hint, source_ts, \
-             done, dismissed, added_manually, created_at, updated_at \
+            "SELECT id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, source_ts, \
+             done, added_manually, created_at, updated_at \
              FROM action_items WHERE id = ?1",
         )
         .bind(id)
@@ -577,7 +673,7 @@ impl SqliteStorageService {
 
     async fn get_open_question(&self, id: &str) -> Result<OpenQuestion, AppError> {
         sqlx::query_as::<_, OpenQuestion>(
-            "SELECT id, conv_id, question, raised_by_hint, owner_hint, owner_source, source_ts, \
+            "SELECT id, conv_id, question, raised_by_hint, raised_by_is_self, owner_hint, owner_is_self, owner_source, source_ts, \
              resolved_conv_id, resolved_at, added_manually, created_at \
              FROM open_questions WHERE id = ?1",
         )
@@ -932,14 +1028,15 @@ impl StorageService for SqliteStorageService {
                 for item in &items.action_items {
                     sqlx::query(
                         "INSERT INTO action_items \
-                         (id, conv_id, text, assignee_hint, due_hint, source_ts, done, dismissed, \
-                          added_manually, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, ?7, ?7)",
+                         (id, conv_id, text, assignee_hint, assignee_is_self, due_hint, \
+                          source_ts, done, added_manually, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?8)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.text)
                     .bind(&item.assignee_hint)
+                    .bind(item.assignee_is_self)
                     .bind(&item.due_hint)
                     .bind(item.source_ts)
                     .bind(now)
@@ -950,14 +1047,16 @@ impl StorageService for SqliteStorageService {
                 for item in &items.decisions {
                     sqlx::query(
                         "INSERT INTO decisions \
-                         (id, conv_id, statement, quote, decided_by_hint, source_ts, added_manually, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                         (id, conv_id, statement, quote, decided_by_hint, decided_by_is_self, \
+                          source_ts, added_manually, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.statement)
                     .bind(&item.quote)
                     .bind(&item.decided_by_hint)
+                    .bind(item.decided_by_is_self)
                     .bind(item.source_ts)
                     .bind(now)
                     .execute(&mut **tx)
@@ -967,13 +1066,15 @@ impl StorageService for SqliteStorageService {
                 for item in &items.open_questions {
                     sqlx::query(
                         "INSERT INTO open_questions \
-                         (id, conv_id, question, raised_by_hint, source_ts, added_manually, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                         (id, conv_id, question, raised_by_hint, raised_by_is_self, source_ts, \
+                          added_manually, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.question)
                     .bind(&item.raised_by_hint)
+                    .bind(item.raised_by_is_self)
                     .bind(item.source_ts)
                     .bind(now)
                     .execute(&mut **tx)
@@ -1006,22 +1107,40 @@ impl StorageService for SqliteStorageService {
                 // follow. Losing a correction on a reworded line is better
                 // than dropping every correction on every regeneration, which
                 // is what happened before this.
-                let kept_assignees: Vec<(String, Option<String>)> = sqlx::query_as(
-                    "SELECT text, assignee_hint FROM action_items \
+                let kept_assignees: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+                    "SELECT text, assignee_hint, assignee_is_self FROM action_items \
                      WHERE conv_id = ?1 AND added_manually = 0 AND assignee_source = 'manual'",
                 )
                 .bind(&conv_id)
                 .fetch_all(&mut **tx)
                 .await
                 .map_err(db_err)?;
-                let kept_owners: Vec<(String, Option<String>)> = sqlx::query_as(
-                    "SELECT question, owner_hint FROM open_questions \
+                let kept_owners: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+                    "SELECT question, owner_hint, owner_is_self FROM open_questions \
                      WHERE conv_id = ?1 AND added_manually = 0 AND owner_source = 'manual'",
                 )
                 .bind(&conv_id)
                 .fetch_all(&mut **tx)
                 .await
                 .map_err(db_err)?;
+
+                // Items the user removed by hand. The model re-derives the
+                // same set from the same transcript every pass, so without
+                // this the delete button would appear to work and then be
+                // undone by the next Regenerate.
+                let tombstoned: std::collections::HashSet<(ExtractionKind, String)> =
+                    sqlx::query_as::<_, (ExtractionKind, String)>(
+                        "SELECT kind, text FROM deleted_extractions WHERE conv_id = ?1",
+                    )
+                    .bind(&conv_id)
+                    .fetch_all(&mut **tx)
+                    .await
+                    .map_err(db_err)?
+                    .into_iter()
+                    .collect();
+                let suppressed = |kind: ExtractionKind, text: &str| {
+                    tombstoned.contains(&(kind, text.to_string()))
+                };
 
                 sqlx::query("DELETE FROM action_items WHERE conv_id = ?1 AND added_manually = 0")
                     .bind(&conv_id)
@@ -1033,25 +1152,27 @@ impl StorageService for SqliteStorageService {
                     .execute(&mut **tx)
                     .await
                     .map_err(db_err)?;
-                sqlx::query(
-                    "DELETE FROM open_questions WHERE conv_id = ?1 AND added_manually = 0",
-                )
-                .bind(&conv_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(db_err)?;
+                sqlx::query("DELETE FROM open_questions WHERE conv_id = ?1 AND added_manually = 0")
+                    .bind(&conv_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(db_err)?;
 
                 for item in &items.action_items {
+                    if suppressed(ExtractionKind::ActionItem, &item.text) {
+                        continue;
+                    }
                     sqlx::query(
                         "INSERT INTO action_items \
-                         (id, conv_id, text, assignee_hint, due_hint, source_ts, done, dismissed, \
-                          added_manually, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, ?7, ?7)",
+                         (id, conv_id, text, assignee_hint, assignee_is_self, due_hint, \
+                          source_ts, done, added_manually, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?8)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.text)
                     .bind(&item.assignee_hint)
+                    .bind(item.assignee_is_self)
                     .bind(&item.due_hint)
                     .bind(item.source_ts)
                     .bind(now)
@@ -1060,16 +1181,21 @@ impl StorageService for SqliteStorageService {
                     .map_err(db_err)?;
                 }
                 for item in &items.decisions {
+                    if suppressed(ExtractionKind::Decision, &item.statement) {
+                        continue;
+                    }
                     sqlx::query(
                         "INSERT INTO decisions \
-                         (id, conv_id, statement, quote, decided_by_hint, source_ts, added_manually, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                         (id, conv_id, statement, quote, decided_by_hint, decided_by_is_self, \
+                          source_ts, added_manually, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.statement)
                     .bind(&item.quote)
                     .bind(&item.decided_by_hint)
+                    .bind(item.decided_by_is_self)
                     .bind(item.source_ts)
                     .bind(now)
                     .execute(&mut **tx)
@@ -1077,15 +1203,20 @@ impl StorageService for SqliteStorageService {
                     .map_err(db_err)?;
                 }
                 for item in &items.open_questions {
+                    if suppressed(ExtractionKind::OpenQuestion, &item.question) {
+                        continue;
+                    }
                     sqlx::query(
                         "INSERT INTO open_questions \
-                         (id, conv_id, question, raised_by_hint, source_ts, added_manually, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                         (id, conv_id, question, raised_by_hint, raised_by_is_self, source_ts, \
+                          added_manually, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
                     )
                     .bind(crate::db::models::new_id())
                     .bind(&conv_id)
                     .bind(&item.question)
                     .bind(&item.raised_by_hint)
+                    .bind(item.raised_by_is_self)
                     .bind(item.source_ts)
                     .bind(now)
                     .execute(&mut **tx)
@@ -1095,24 +1226,26 @@ impl StorageService for SqliteStorageService {
                 // Re-apply the corrections captured above. `assignee_source`
                 // is set back to 'manual' so the next regeneration carries
                 // them again.
-                for (text, assignee_hint) in &kept_assignees {
+                for (text, assignee_hint, assignee_is_self) in &kept_assignees {
                     sqlx::query(
-                        "UPDATE action_items SET assignee_hint = ?1, assignee_source = 'manual' \
-                         WHERE conv_id = ?2 AND text = ?3",
+                        "UPDATE action_items SET assignee_hint = ?1, assignee_is_self = ?2, \
+                         assignee_source = 'manual' WHERE conv_id = ?3 AND text = ?4",
                     )
                     .bind(assignee_hint)
+                    .bind(assignee_is_self)
                     .bind(&conv_id)
                     .bind(text)
                     .execute(&mut **tx)
                     .await
                     .map_err(db_err)?;
                 }
-                for (question, owner_hint) in &kept_owners {
+                for (question, owner_hint, owner_is_self) in &kept_owners {
                     sqlx::query(
-                        "UPDATE open_questions SET owner_hint = ?1, owner_source = 'manual' \
-                         WHERE conv_id = ?2 AND question = ?3",
+                        "UPDATE open_questions SET owner_hint = ?1, owner_is_self = ?2, \
+                         owner_source = 'manual' WHERE conv_id = ?3 AND question = ?4",
                     )
                     .bind(owner_hint)
+                    .bind(owner_is_self)
                     .bind(&conv_id)
                     .bind(question)
                     .execute(&mut **tx)
@@ -1121,9 +1254,9 @@ impl StorageService for SqliteStorageService {
                 }
 
                 // Agent-suggested bookmarks: insert only rows not already
-                // present (LLD-05 §4.4 — user-tapped bookmarks are never
+                // present — user-tapped bookmarks are never
                 // bulk-deleted, so this is an upsert-by-absence, not a
-                // delete-then-insert like the three tables above).
+                // delete-then-insert like the three tables above.
                 for item in &items.bookmarks {
                     let exists: Option<(i64,)> = sqlx::query_as(
                         "SELECT 1 FROM bookmarks WHERE conv_id = ?1 AND ts_ms = ?2 AND label IS ?3",
@@ -1174,8 +1307,7 @@ impl StorageService for SqliteStorageService {
             });
         }
         sqlx::query_as::<_, ActionItem>(
-            "SELECT id, conv_id, text, assignee_hint, assignee_source, due_hint, source_ts, done, \
-             dismissed, \
+            "SELECT id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, source_ts, done, \
              added_manually, created_at, updated_at FROM action_items WHERE id = ?1",
         )
         .bind(id)
@@ -1188,13 +1320,15 @@ impl StorageService for SqliteStorageService {
         &self,
         id: &str,
         assignee_hint: Option<String>,
+        assignee_is_self: bool,
     ) -> Result<ActionItem, AppError> {
         let now = unix_now();
         let touched = sqlx::query(
-            "UPDATE action_items SET assignee_hint = ?1, assignee_source = 'manual', \
-             updated_at = ?2 WHERE id = ?3",
+            "UPDATE action_items SET assignee_hint = ?1, assignee_is_self = ?2, \
+             assignee_source = 'manual', updated_at = ?3 WHERE id = ?4",
         )
         .bind(&assignee_hint)
+        .bind(assignee_is_self)
         .bind(now)
         .bind(id)
         .execute(&self.pools.write)
@@ -1214,11 +1348,14 @@ impl StorageService for SqliteStorageService {
         &self,
         id: &str,
         owner_hint: Option<String>,
+        owner_is_self: bool,
     ) -> Result<OpenQuestion, AppError> {
         let touched = sqlx::query(
-            "UPDATE open_questions SET owner_hint = ?1, owner_source = 'manual' WHERE id = ?2",
+            "UPDATE open_questions SET owner_hint = ?1, owner_is_self = ?2, \
+             owner_source = 'manual' WHERE id = ?3",
         )
         .bind(&owner_hint)
+        .bind(owner_is_self)
         .bind(id)
         .execute(&self.pools.write)
         .await
@@ -1261,6 +1398,230 @@ impl StorageService for SqliteStorageService {
         self.get_open_question(id).await
     }
 
+    async fn delete_extraction_item(
+        &self,
+        kind: ExtractionKind,
+        id: &str,
+    ) -> Result<DeletedExtraction, AppError> {
+        // Read the whole row before removing it: the caller needs it for undo,
+        // and its text is what the tombstone is keyed on. Both reads and both
+        // writes are one transaction, so a crash between them can't leave a
+        // tombstone with the row still present (the item would vanish on the
+        // next regenerate having never been deleted).
+        let id = id.to_string();
+        with_write_tx(&self.pools.write, move |tx| {
+            Box::pin(async move {
+                let deleted = match kind {
+                    ExtractionKind::ActionItem => sqlx::query_as::<_, ActionItem>(
+                        "SELECT id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, \
+                         source_ts, done, added_manually, created_at, updated_at \
+                         FROM action_items WHERE id = ?1",
+                    )
+                    .bind(&id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(db_err)?
+                    .map(DeletedExtraction::ActionItem),
+                    ExtractionKind::Decision => sqlx::query_as::<_, Decision>(
+                        "SELECT id, conv_id, project_id, statement, quote, decided_by_hint, \
+                         decided_by_is_self, source_ts, added_manually, created_at \
+                         FROM decisions WHERE id = ?1",
+                    )
+                    .bind(&id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(db_err)?
+                    .map(DeletedExtraction::Decision),
+                    ExtractionKind::OpenQuestion => sqlx::query_as::<_, OpenQuestion>(
+                        "SELECT id, conv_id, question, raised_by_hint, raised_by_is_self, owner_hint, owner_is_self, owner_source, \
+                         source_ts, resolved_conv_id, resolved_at, added_manually, created_at \
+                         FROM open_questions WHERE id = ?1",
+                    )
+                    .bind(&id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(db_err)?
+                    .map(DeletedExtraction::OpenQuestion),
+                };
+                let Some(deleted) = deleted else {
+                    return Err(AppError::NotFound {
+                        entity: kind.table_and_text_column().0.into(),
+                        id: id.clone(),
+                    });
+                };
+
+                let (table, _) = kind.table_and_text_column();
+                sqlx::query(&format!("DELETE FROM {table} WHERE id = ?1"))
+                    .bind(&id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(db_err)?;
+
+                if let Some((conv_id, text)) = deleted.tombstone_key() {
+                    insert_tombstone(tx, conv_id, kind, text).await?;
+                }
+                Ok(deleted)
+            })
+        })
+        .await
+    }
+
+    async fn restore_extraction_item(&self, item: DeletedExtraction) -> Result<(), AppError> {
+        with_write_tx(&self.pools.write, move |tx| {
+            Box::pin(async move {
+                if let Some((conv_id, text)) = item.tombstone_key() {
+                    sqlx::query(
+                        "DELETE FROM deleted_extractions \
+                         WHERE conv_id = ?1 AND kind = ?2 AND text = ?3",
+                    )
+                    .bind(conv_id)
+                    .bind(item.kind())
+                    .bind(text)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(db_err)?;
+                }
+                match &item {
+                    DeletedExtraction::ActionItem(i) => {
+                        sqlx::query(
+                            "INSERT INTO action_items \
+                             (id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, \
+                              source_ts, done, added_manually, created_at, updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        )
+                        .bind(&i.id)
+                        .bind(&i.conv_id)
+                        .bind(&i.text)
+                        .bind(&i.assignee_hint)
+                        .bind(i.assignee_is_self)
+                        .bind(i.assignee_source)
+                        .bind(&i.due_hint)
+                        .bind(i.source_ts)
+                        .bind(i.done)
+                        .bind(i.added_manually)
+                        .bind(i.created_at)
+                        .bind(i.updated_at)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(db_err)?;
+                    }
+                    DeletedExtraction::Decision(d) => {
+                        sqlx::query(
+                            "INSERT INTO decisions \
+                             (id, conv_id, project_id, statement, quote, decided_by_hint, \
+                              decided_by_is_self, source_ts, added_manually, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        )
+                        .bind(&d.id)
+                        .bind(&d.conv_id)
+                        .bind(&d.project_id)
+                        .bind(&d.statement)
+                        .bind(&d.quote)
+                        .bind(&d.decided_by_hint)
+                        .bind(d.decided_by_is_self)
+                        .bind(d.source_ts)
+                        .bind(d.added_manually)
+                        .bind(d.created_at)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(db_err)?;
+                    }
+                    DeletedExtraction::OpenQuestion(q) => {
+                        sqlx::query(
+                            "INSERT INTO open_questions \
+                             (id, conv_id, question, raised_by_hint, raised_by_is_self, owner_hint, owner_is_self, owner_source, \
+                              source_ts, resolved_conv_id, resolved_at, added_manually, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        )
+                        .bind(&q.id)
+                        .bind(&q.conv_id)
+                        .bind(&q.question)
+                        .bind(&q.raised_by_hint)
+                        .bind(q.raised_by_is_self)
+                        .bind(&q.owner_hint)
+                        .bind(q.owner_is_self)
+                        .bind(q.owner_source)
+                        .bind(q.source_ts)
+                        .bind(&q.resolved_conv_id)
+                        .bind(q.resolved_at)
+                        .bind(q.added_manually)
+                        .bind(q.created_at)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(db_err)?;
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    async fn set_extraction_text(
+        &self,
+        kind: ExtractionKind,
+        id: &str,
+        text: &str,
+    ) -> Result<(), AppError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(AppError::Validation {
+                message: "text cannot be empty".into(),
+                field: Some("text".into()),
+            });
+        }
+        let (id, text) = (id.to_string(), text.to_string());
+        with_write_tx(&self.pools.write, move |tx| {
+            Box::pin(async move {
+                let (table, column) = kind.table_and_text_column();
+                let previous: Option<(Option<String>, String)> = sqlx::query_as(&format!(
+                    "SELECT conv_id, {column} FROM {table} WHERE id = ?1"
+                ))
+                .bind(&id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(db_err)?;
+                let Some((conv_id, previous_text)) = previous else {
+                    return Err(AppError::NotFound {
+                        entity: table.into(),
+                        id: id.clone(),
+                    });
+                };
+                if previous_text == text {
+                    return Ok(());
+                }
+
+                sqlx::query(&format!(
+                    "UPDATE {table} SET {column} = ?1, added_manually = 1 WHERE id = ?2"
+                ))
+                .bind(&text)
+                .bind(&id)
+                .execute(&mut **tx)
+                .await
+                .map_err(db_err)?;
+                // `action_items` is the only one of the three carrying an
+                // `updated_at`, so it is the only one that can be touched here.
+                if kind == ExtractionKind::ActionItem {
+                    sqlx::query("UPDATE action_items SET updated_at = ?1 WHERE id = ?2")
+                        .bind(unix_now())
+                        .bind(&id)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(db_err)?;
+                }
+
+                // Suppress the wording the model produced, not the wording the
+                // user just wrote — otherwise the edit would tombstone itself
+                // and vanish on the next regenerate.
+                if let Some(conv_id) = conv_id.as_deref() {
+                    insert_tombstone(tx, conv_id, kind, &previous_text).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
+
     async fn insert_action_item(
         &self,
         conv_id: &str,
@@ -1276,14 +1637,15 @@ impl StorageService for SqliteStorageService {
         let now = unix_now();
         sqlx::query(
             "INSERT INTO action_items \
-             (id, conv_id, text, assignee_hint, due_hint, source_ts, done, dismissed, \
+             (id, conv_id, text, assignee_hint, assignee_is_self, due_hint, source_ts, done, \
               added_manually, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 1, ?7, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 1, ?8, ?8)",
         )
         .bind(&id)
         .bind(conv_id)
         .bind(&row.text)
         .bind(&row.assignee_hint)
+        .bind(row.assignee_is_self)
         .bind(&row.due_hint)
         .bind(row.source_ts)
         .bind(now)
@@ -1291,8 +1653,7 @@ impl StorageService for SqliteStorageService {
         .await
         .map_err(db_err)?;
         sqlx::query_as::<_, ActionItem>(
-            "SELECT id, conv_id, text, assignee_hint, assignee_source, due_hint, source_ts, done, \
-             dismissed, \
+            "SELECT id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, source_ts, done, \
              added_manually, created_at, updated_at FROM action_items WHERE id = ?1",
         )
         .bind(&id)
@@ -1306,6 +1667,7 @@ impl StorageService for SqliteStorageService {
         project_id: Option<&str>,
         text: &str,
         assignee_hint: Option<&str>,
+        assignee_is_self: bool,
     ) -> Result<ActionItemWithSource, AppError> {
         if text.trim().is_empty() {
             return Err(AppError::Validation {
@@ -1316,28 +1678,29 @@ impl StorageService for SqliteStorageService {
         let id = crate::db::models::new_id();
         let now = unix_now();
         // `assignee_hint` is set in the same INSERT, not a follow-up
-        // `UPDATE` — Home's "+" needs to self-assign ("You") for the item to
+        // `UPDATE` — Home's "+" needs to self-assign for the item to
         // appear in a list filtered to `assigned_to_me`, and a two-call
         // version left a window where the create succeeded, the assign
         // failed, and the row became a permanently invisible orphan (no
         // conv_id, no project_id, no assignee — nothing lists it). One
         // INSERT means there is no such window: it either has the assignee
         // from the start or the whole write failed and nothing was created.
-        let assignee_source = if assignee_hint.is_some() {
+        let assignee_source = if assignee_hint.is_some() || assignee_is_self {
             HintSource::Manual
         } else {
             HintSource::Model
         };
         sqlx::query(
             "INSERT INTO action_items \
-             (id, conv_id, project_id, text, assignee_hint, assignee_source, done, dismissed, \
-              added_manually, created_at, updated_at) \
-             VALUES (?1, NULL, ?2, ?3, ?4, ?5, 0, 0, 1, ?6, ?6)",
+             (id, conv_id, project_id, text, assignee_hint, assignee_is_self, assignee_source, \
+              done, added_manually, created_at, updated_at) \
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, 0, 1, ?7, ?7)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(text.trim())
         .bind(assignee_hint)
+        .bind(assignee_is_self)
         .bind(assignee_source)
         .bind(now)
         .execute(&self.pools.write)
@@ -1349,21 +1712,20 @@ impl StorageService for SqliteStorageService {
             project_id: project_id.map(str::to_string),
             text: text.trim().to_string(),
             assignee_hint: assignee_hint.map(str::to_string),
+            assignee_is_self,
             assignee_source,
             due_hint: None,
             source_ts: None,
             done: false,
-            dismissed: false,
             created_at: now,
         })
     }
 
     async fn list_action_items(&self, conv_id: &str) -> Result<Vec<ActionItem>, AppError> {
         sqlx::query_as::<_, ActionItem>(
-            "SELECT id, conv_id, text, assignee_hint, assignee_source, due_hint, source_ts, done, \
-             dismissed, \
+            "SELECT id, conv_id, text, assignee_hint, assignee_is_self, assignee_source, due_hint, source_ts, done, \
              added_manually, created_at, updated_at FROM action_items \
-             WHERE conv_id = ?1 AND dismissed = 0 ORDER BY created_at ASC",
+             WHERE conv_id = ?1 ORDER BY created_at ASC",
         )
         .bind(conv_id)
         .fetch_all(&self.pools.read)
@@ -1373,8 +1735,17 @@ impl StorageService for SqliteStorageService {
 
     async fn list_decisions(&self, conv_id: &str) -> Result<Vec<Decision>, AppError> {
         sqlx::query_as::<_, Decision>(
-            "SELECT id, conv_id, statement, quote, decided_by_hint, source_ts, added_manually, \
-             created_at FROM decisions WHERE conv_id = ?1 ORDER BY created_at ASC",
+            // `project_id` is part of `Decision`, so omitting it here made
+            // `query_as` fail at runtime with "no column found for name:
+            // project_id" — every conversation-detail load errored out and
+            // the route rendered its not-found state, so a conversation that
+            // existed and had recorded fine looked lost. Selected explicitly
+            // rather than via `SELECT *` to stay consistent with the rest of
+            // this module, which means new columns on the struct have to be
+            // added here too.
+            "SELECT id, conv_id, project_id, statement, quote, decided_by_hint, \
+             decided_by_is_self, source_ts, added_manually, created_at \
+             FROM decisions WHERE conv_id = ?1 ORDER BY created_at ASC",
         )
         .bind(conv_id)
         .fetch_all(&self.pools.read)
@@ -1384,7 +1755,7 @@ impl StorageService for SqliteStorageService {
 
     async fn list_open_questions(&self, conv_id: &str) -> Result<Vec<OpenQuestion>, AppError> {
         sqlx::query_as::<_, OpenQuestion>(
-            "SELECT id, conv_id, question, raised_by_hint, owner_hint, owner_source, source_ts, \
+            "SELECT id, conv_id, question, raised_by_hint, raised_by_is_self, owner_hint, owner_is_self, owner_source, source_ts, \
              resolved_conv_id, \
              resolved_at, added_manually, created_at FROM open_questions \
              WHERE conv_id = ?1 ORDER BY created_at ASC",
@@ -1401,8 +1772,9 @@ impl StorageService for SqliteStorageService {
     ) -> Result<Vec<ActionItemWithSource>, AppError> {
         let sql = format!(
             "SELECT ai.id, ai.conv_id, COALESCE(ai.project_id, c.project_id) AS project_id, \
-             ai.text, ai.assignee_hint, ai.assignee_source, ai.due_hint, ai.source_ts, ai.done, \
-             ai.dismissed, ai.created_at \
+             ai.text, ai.assignee_hint, ai.assignee_is_self, ai.assignee_source, ai.due_hint, \
+             ai.source_ts, ai.done, \
+             ai.created_at \
              FROM action_items ai LEFT JOIN conversations c ON c.id = ai.conv_id{} \
              ORDER BY COALESCE(ai.source_ts, ai.created_at) DESC, ai.id DESC LIMIT ? OFFSET ?",
             action_item_where(&filter)
@@ -1433,7 +1805,8 @@ impl StorageService for SqliteStorageService {
     ) -> Result<Vec<Decision>, AppError> {
         let sql = format!(
             "SELECT d.id, d.conv_id, COALESCE(d.project_id, c.project_id) AS project_id, \
-             d.statement, d.quote, d.decided_by_hint, d.source_ts, d.added_manually, d.created_at \
+             d.statement, d.quote, d.decided_by_hint, d.decided_by_is_self, d.source_ts, \
+             d.added_manually, d.created_at \
              FROM decisions d LEFT JOIN conversations c ON c.id = d.conv_id{} \
              ORDER BY COALESCE(d.source_ts, d.created_at) ASC, d.id ASC LIMIT ? OFFSET ?",
             decision_where(&filter)
@@ -1464,7 +1837,8 @@ impl StorageService for SqliteStorageService {
     ) -> Result<Vec<OpenQuestionWithSource>, AppError> {
         let sql = format!(
             "SELECT oq.id, oq.conv_id, COALESCE(oq.project_id, c.project_id) AS project_id, \
-             oq.question, oq.raised_by_hint, oq.owner_hint, oq.owner_source, oq.source_ts, \
+             oq.question, oq.raised_by_hint, oq.raised_by_is_self, oq.owner_hint, \
+             oq.owner_is_self, oq.owner_source, oq.source_ts, \
              oq.resolved_conv_id, oq.resolved_at, oq.created_at \
              FROM open_questions oq LEFT JOIN conversations c ON c.id = oq.conv_id{} \
              ORDER BY COALESCE(oq.source_ts, oq.created_at) DESC, oq.id DESC LIMIT ? OFFSET ?",
@@ -1641,56 +2015,109 @@ impl StorageService for SqliteStorageService {
 
     async fn open_chat_session(&self, new: NewChatSession) -> Result<ChatSession, AppError> {
         validate_chat_scope(&new)?;
-        let id = crate::db::models::new_id();
-        let epoch = crate::db::models::new_id();
         let now = unix_now();
+        // `OR IGNORE`, not a plain INSERT: the id comes from the caller, and
+        // a retried or double-fired first send must resolve to the same
+        // chat rather than a second one. The SELECT below then returns
+        // whichever row won.
         sqlx::query(
-            "INSERT INTO chat_sessions \
-             (id, runner_id, scope_type, scope_id, epoch, status, title, message_count, \
+            "INSERT OR IGNORE INTO chat_sessions \
+             (id, runner_id, scope_type, scope_id, title, message_count, \
               total_input_tokens, total_output_tokens, cost_micros, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'idle', ?6, 0, 0, 0, 0, ?7, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, 0, ?6, ?6)",
         )
-        .bind(&id)
+        .bind(&new.id)
         .bind(&new.runner_id)
         .bind(new.scope_type)
         .bind(&new.scope_id)
-        .bind(&epoch)
         .bind(&new.title)
         .bind(now)
         .execute(&self.pools.write)
         .await
         .map_err(db_err)?;
         sqlx::query_as::<_, ChatSession>(
-            "SELECT id, runner_id, scope_type, scope_id, session_id, epoch, status, title, \
-             superseded_by_id, message_count, total_input_tokens, total_output_tokens, \
+            "SELECT id, runner_id, scope_type, scope_id, runner_session_id, title, \
+             message_count, total_input_tokens, total_output_tokens, \
              cost_micros, created_at, updated_at \
              FROM chat_sessions WHERE id = ?1",
         )
-        .bind(&id)
+        .bind(&new.id)
         .fetch_one(&self.pools.read)
         .await
         .map_err(db_err)
     }
 
+    async fn delete_chat_session(&self, id: &str) -> Result<(), AppError> {
+        // `chat_journal` rows go with it via `ON DELETE CASCADE`
+        // (`PRAGMA foreign_keys` is on — see `db::mod`).
+        let touched = sqlx::query("DELETE FROM chat_sessions WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pools.write)
+            .await
+            .map_err(db_err)?
+            .rows_affected();
+        if touched == 0 {
+            return Err(AppError::NotFound {
+                entity: "chat_session".into(),
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn next_chat_seq(&self, session_id: &str) -> Result<i64, AppError> {
+        let next: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM chat_journal WHERE session_id = ?1",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pools.read)
+        .await
+        .map_err(db_err)?;
+        Ok(next)
+    }
+
+    async fn add_chat_session_usage(
+        &self,
+        id: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost_micros: i64,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE chat_sessions SET \
+               total_input_tokens = total_input_tokens + ?1, \
+               total_output_tokens = total_output_tokens + ?2, \
+               cost_micros = cost_micros + ?3, \
+               updated_at = ?4 \
+             WHERE id = ?5",
+        )
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(cost_micros)
+        .bind(unix_now())
+        .bind(id)
+        .execute(&self.pools.write)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
     async fn append_chat_event(
         &self,
         session_id: &str,
-        epoch: &str,
         seq: i64,
         event: serde_json::Value,
     ) -> Result<(), AppError> {
         let session_id = session_id.to_string();
-        let epoch = epoch.to_string();
         with_write_tx(&self.pools.write, move |tx| {
             Box::pin(async move {
                 let now = unix_now();
                 let event_json = event.to_string();
                 sqlx::query(
-                    "INSERT INTO chat_journal (session_id, epoch, seq, ts, event_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO chat_journal (session_id, seq, ts, event_json) \
+                     VALUES (?1, ?2, ?3, ?4)",
                 )
                 .bind(&session_id)
-                .bind(&epoch)
                 .bind(seq)
                 .bind(now)
                 .bind(&event_json)
@@ -1725,9 +2152,9 @@ impl StorageService for SqliteStorageService {
         before_seq: Option<i64>,
         limit: u32,
     ) -> Result<Vec<ChatEventRecord>, AppError> {
-        let rows: Vec<(String, String, i64, i64, String)> = if let Some(before) = before_seq {
+        let rows: Vec<(String, i64, i64, String)> = if let Some(before) = before_seq {
             sqlx::query_as(
-                "SELECT session_id, epoch, seq, ts, event_json FROM chat_journal \
+                "SELECT session_id, seq, ts, event_json FROM chat_journal \
                  WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
             )
             .bind(session_id)
@@ -1738,7 +2165,7 @@ impl StorageService for SqliteStorageService {
             .map_err(db_err)?
         } else {
             sqlx::query_as(
-                "SELECT session_id, epoch, seq, ts, event_json FROM chat_journal \
+                "SELECT session_id, seq, ts, event_json FROM chat_journal \
                  WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2",
             )
             .bind(session_id)
@@ -1749,9 +2176,8 @@ impl StorageService for SqliteStorageService {
         };
         let mut out: Vec<ChatEventRecord> = rows
             .into_iter()
-            .map(|(session_id, epoch, seq, ts, event_json)| ChatEventRecord {
+            .map(|(session_id, seq, ts, event_json)| ChatEventRecord {
                 session_id,
-                epoch,
                 seq,
                 ts,
                 event_json: serde_json::from_str(&event_json).unwrap_or(serde_json::Value::Null),
@@ -1771,21 +2197,18 @@ impl StorageService for SqliteStorageService {
         // has no `scope_id`; v1 only ever sets `runner_id = Some("claude")`
         // but the column is nullable) matches NULL correctly — `= NULL` is
         // never true in SQLite.
-        // `superseded_by_id IS NULL`: a "New chat" (`start_new_session`)
-        // keeps the old row around (renameable, listable) instead of
-        // overwriting it, so this lookup — "the one *active* session for
-        // this scope" — must exclude superseded rows explicitly rather than
-        // relying on `ORDER BY updated_at DESC` alone (design doc §2.5's
-        // review-caught gap: a superseded row's `updated_at` isn't
-        // guaranteed older at read time).
+        //
+        // `rowid DESC` breaks ties: `updated_at` is unix *seconds*, so two
+        // chats touched in the same second are indistinguishable by it and
+        // "the last one you used" would be whichever SQLite happened to
+        // return. `rowid` is monotonic on insert, so the newer chat wins.
         sqlx::query_as::<_, ChatSession>(
-            "SELECT id, runner_id, scope_type, scope_id, session_id, epoch, status, title, \
-             superseded_by_id, message_count, total_input_tokens, total_output_tokens, \
+            "SELECT id, runner_id, scope_type, scope_id, runner_session_id, title, \
+             message_count, total_input_tokens, total_output_tokens, \
              cost_micros, created_at, updated_at \
              FROM chat_sessions \
              WHERE runner_id IS ?1 AND scope_type = ?2 AND scope_id IS ?3 \
-               AND superseded_by_id IS NULL \
-             ORDER BY updated_at DESC LIMIT 1",
+             ORDER BY updated_at DESC, rowid DESC LIMIT 1",
         )
         .bind(runner_id)
         .bind(scope_type)
@@ -1795,20 +2218,34 @@ impl StorageService for SqliteStorageService {
         .map_err(db_err)
     }
 
+    async fn get_chat_session(&self, id: &str) -> Result<Option<ChatSession>, AppError> {
+        sqlx::query_as::<_, ChatSession>(
+            "SELECT id, runner_id, scope_type, scope_id, runner_session_id, title, \
+             message_count, total_input_tokens, total_output_tokens, \
+             cost_micros, created_at, updated_at \
+             FROM chat_sessions WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pools.read)
+        .await
+        .map_err(db_err)
+    }
+
     async fn set_chat_session_runner_session_id(
         &self,
         id: &str,
-        session_id: &str,
+        runner_session_id: &str,
     ) -> Result<(), AppError> {
-        let touched =
-            sqlx::query("UPDATE chat_sessions SET session_id = ?1, updated_at = ?2 WHERE id = ?3")
-                .bind(session_id)
-                .bind(unix_now())
-                .bind(id)
-                .execute(&self.pools.write)
-                .await
-                .map_err(db_err)?
-                .rows_affected();
+        let touched = sqlx::query(
+            "UPDATE chat_sessions SET runner_session_id = ?1, updated_at = ?2 WHERE id = ?3",
+        )
+        .bind(runner_session_id)
+        .bind(unix_now())
+        .bind(id)
+        .execute(&self.pools.write)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
         if touched == 0 {
             return Err(AppError::NotFound {
                 entity: "chat_session".into(),
@@ -1818,97 +2255,16 @@ impl StorageService for SqliteStorageService {
         Ok(())
     }
 
-    async fn start_new_chat_session(&self, new: NewChatSession) -> Result<ChatSession, AppError> {
-        validate_chat_scope(&new)?;
-        let id = crate::db::models::new_id();
-        let epoch = crate::db::models::new_id();
-
-        with_write_tx(&self.pools.write, move |tx| {
-            Box::pin(async move {
-                let now = unix_now();
-
-                // Deferred within this transaction only (SQLite
-                // auto-resets it at commit/rollback) — the old row must be
-                // superseded *before* the new row is inserted (see below),
-                // which means its `superseded_by_id` briefly references an
-                // id that doesn't exist in `chat_sessions` yet. Unlike
-                // `PRAGMA foreign_keys`, `defer_foreign_keys` is documented
-                // as safe to toggle mid-transaction.
-                sqlx::query("PRAGMA defer_foreign_keys = ON")
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(db_err)?;
-
-                // The one active row for this scope, if any — same
-                // predicate as `find_chat_session_by_scope`, run inside
-                // this transaction so it can't race a concurrent
-                // `start_new_chat_session`/`send_prompt` for the same
-                // scope (the UNIQUE index is the final backstop; this read
-                // is what lets a normal, non-racing call supersede the
-                // *correct* row instead of just relying on that backstop
-                // to reject a bad insert after the fact).
-                let previous_active_id: Option<String> = sqlx::query_scalar(
-                    "SELECT id FROM chat_sessions \
-                     WHERE runner_id IS ?1 AND scope_type = ?2 AND scope_id IS ?3 \
-                       AND superseded_by_id IS NULL",
-                )
-                .bind(&new.runner_id)
-                .bind(new.scope_type)
-                .bind(&new.scope_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(db_err)?;
-
-                // Supersede the old row *before* inserting the new one:
-                // both the old row (until this UPDATE lands) and a
-                // just-inserted new row satisfy "active" (`superseded_by_id
-                // IS NULL`), and the UNIQUE index enforces at most one
-                // active row per scope at every statement boundary, not
-                // just at commit — inserting first would violate it the
-                // instant the INSERT ran, with the old row still active.
-                if let Some(previous_id) = &previous_active_id {
-                    sqlx::query(
-                        "UPDATE chat_sessions SET superseded_by_id = ?1, updated_at = ?2 \
-                         WHERE id = ?3",
-                    )
-                    .bind(&id)
-                    .bind(now)
-                    .bind(previous_id)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(db_err)?;
-                }
-
-                sqlx::query(
-                    "INSERT INTO chat_sessions \
-                     (id, runner_id, scope_type, scope_id, epoch, status, title, message_count, \
-                      total_input_tokens, total_output_tokens, cost_micros, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'idle', ?6, 0, 0, 0, 0, ?7, ?7)",
-                )
-                .bind(&id)
-                .bind(&new.runner_id)
-                .bind(new.scope_type)
-                .bind(&new.scope_id)
-                .bind(&epoch)
-                .bind(&new.title)
-                .bind(now)
-                .execute(&mut **tx)
-                .await
-                .map_err(db_err)?;
-
-                sqlx::query_as::<_, ChatSession>(
-                    "SELECT id, runner_id, scope_type, scope_id, session_id, epoch, status, \
-                     title, superseded_by_id, message_count, total_input_tokens, \
-                     total_output_tokens, cost_micros, created_at, updated_at \
-                     FROM chat_sessions WHERE id = ?1",
-                )
-                .bind(&id)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(db_err)
-            })
-        })
+    async fn clear_chat_session_runner_session_id(&self, id: &str) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE chat_sessions SET runner_session_id = NULL, updated_at = ?1 WHERE id = ?2",
+        )
+        .bind(unix_now())
+        .bind(id)
+        .execute(&self.pools.write)
         .await
+        .map_err(db_err)?;
+        Ok(())
     }
 
     async fn update_chat_session_title(&self, id: &str, title: &str) -> Result<(), AppError> {
@@ -1942,13 +2298,13 @@ impl StorageService for SqliteStorageService {
         before_updated_at: Option<i64>,
         limit: u32,
     ) -> Result<Vec<ChatSession>, AppError> {
-        let base = "SELECT id, runner_id, scope_type, scope_id, session_id, epoch, status, \
-                     title, superseded_by_id, message_count, total_input_tokens, \
+        let base = "SELECT id, runner_id, scope_type, scope_id, runner_session_id, \
+                     title, message_count, total_input_tokens, \
                      total_output_tokens, cost_micros, created_at, updated_at \
                      FROM chat_sessions";
         if let Some(before) = before_updated_at {
             sqlx::query_as::<_, ChatSession>(&format!(
-                "{base} WHERE updated_at < ?1 ORDER BY updated_at DESC LIMIT ?2"
+                "{base} WHERE updated_at < ?1 ORDER BY updated_at DESC, rowid DESC LIMIT ?2"
             ))
             .bind(before)
             .bind(limit as i64)
@@ -1956,11 +2312,13 @@ impl StorageService for SqliteStorageService {
             .await
             .map_err(db_err)
         } else {
-            sqlx::query_as::<_, ChatSession>(&format!("{base} ORDER BY updated_at DESC LIMIT ?1"))
-                .bind(limit as i64)
-                .fetch_all(&self.pools.read)
-                .await
-                .map_err(db_err)
+            sqlx::query_as::<_, ChatSession>(&format!(
+                "{base} ORDER BY updated_at DESC, rowid DESC LIMIT ?1"
+            ))
+            .bind(limit as i64)
+            .fetch_all(&self.pools.read)
+            .await
+            .map_err(db_err)
         }
     }
 

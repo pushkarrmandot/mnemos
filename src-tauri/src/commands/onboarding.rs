@@ -1,11 +1,11 @@
-//! Onboarding funnel (W15 sub-brief) — first-run state, Claude CLI
+//! Onboarding funnel — first-run state, Claude CLI
 //! detection, mic/Screen-Recording permission preflight (macOS), and the
 //! Parakeet model-download progress observer. v1/Claude-only: no runner
 //! picker (see `ipc::runner::registry::RunnerKind` for the multi-runner
 //! seam this reuses without exposing it).
 //!
 //! First-run persistence rides the existing generic `settings` k/v store
-//! (`StorageService::get_setting`/`set_setting`, LLD-01) rather than a new
+//! (`StorageService::get_setting`/`set_setting`) rather than a new
 //! table — onboarding needed exactly the shape that store already has.
 //! Deliberately *not* a step-index/progress-pointer: each screen re-derives
 //! its own status from real device state on mount (CLI detected? permission
@@ -38,7 +38,7 @@ pub struct OnboardingStatus {
     /// section) has two rows: "record your first conversation" — derived
     /// for free from whether any conversation exists, never stored here —
     /// and "connect your calendar," which this field tracks. Calendar
-    /// *integration* itself is v1.4 (W17); v1 has nothing to actually
+    /// *integration* itself is a later release; v1 has nothing to actually
     /// connect, so "Connect" navigates to the `/integrations` stub and
     /// clicking it is treated as satisfying the row (there is no real
     /// "connected" signal in v1 to check against instead).
@@ -96,7 +96,7 @@ pub async fn onboarding_dismiss_calendar_checklist(
         .await
 }
 
-/// W18: the Welcome screen now requires a first name before either of its
+/// The Welcome screen requires a first name before either of its
 /// exits (Continue, "I've used Mnemos before") proceeds — attribution
 /// (`memory::self_contact`) depends on it, so the "zero form-filling"
 /// `01_ONBOARDING.md` goal lost to that. `last_name` stays optional. The
@@ -160,7 +160,7 @@ pub async fn onboarding_complete(state: State<'_, AppState>) -> Result<(), AppEr
 /// `find_claude_binary` already uses when a chat/extraction runner actually
 /// spawns. Does not attempt to verify login state (see `RunnerKind::detect`'s
 /// doc comment for why) — a not-logged-in CLI is caught by the existing
-/// runtime error path (W8) the first time it's actually used, not gated here.
+/// runtime error path the first time it's actually used, not gated here.
 #[tauri::command]
 #[specta::specta]
 pub fn onboarding_check_claude_cli() -> RunnerDetection {
@@ -234,15 +234,23 @@ mod mac_permissions {
     pub async fn request_screen(state: &State<'_, AppState>) -> Result<PermissionState, AppError> {
         let v = run_permission_subcommand(state.python.sidecar_bin(), "request-screen-permission")
             .await?;
-        // Unlike the check-only path, a real `CGRequestScreenCaptureAccess`
-        // call *does* distinguish denied from granted precisely (it only
-        // silently returns `false` without prompting when already denied —
-        // never confused with "never asked", since "never asked" always
-        // shows the prompt and blocks here until the user answers it).
+        // `CGRequestScreenCaptureAccess` cannot distinguish denied from
+        // never-asked either — it never prompts synchronously for this
+        // service (`tccd`: "Service kTCCServiceScreenCapture does not allow
+        // prompting; returning denied") and returns `false` immediately in
+        // both cases, with macOS posting its own consent alert out of band
+        // and the grant only applying after a relaunch. The sidecar reports
+        // that ambiguous `false` as `pending` rather than `denied`, since
+        // calling the normal first-run path a hard denial would leave every
+        // new user staring at a permanently "denied" row they never refused.
+        // `Undetermined` keeps Continue correctly gated without asserting a
+        // refusal that may not have happened; the UI routes it to System
+        // Settings + relaunch, which is the real path forward either way.
         Ok(
             match v.get("screen").and_then(|x| x.as_str()).unwrap_or("") {
                 "granted" => PermissionState::Granted,
-                _ => PermissionState::Denied,
+                "denied" => PermissionState::Denied,
+                _ => PermissionState::Undetermined,
             },
         )
     }
@@ -251,8 +259,8 @@ mod mac_permissions {
 /// Windows: no verified proactive permission check exists in v1 (no Windows
 /// dev machine — same gap this codebase already flags for `pyaudiowpatch`/
 /// WASAPI elsewhere). Mic access is requested implicitly by the OS the first
-/// time a real capture stream opens (existing `WindowsCapture` behavior,
-/// LLD-03 §4.2); Screen Recording has no Windows equivalent card at all
+/// time a real capture stream opens (existing `WindowsCapture` behavior);
+/// Screen Recording has no Windows equivalent card at all
 /// (mac-only TCC gate, already hidden from this OS by the frontend). Both
 /// report `NotApplicable` rather than a guessed status, and onboarding never
 /// blocks Continue on a permission it cannot verify.
@@ -391,7 +399,7 @@ pub fn onboarding_open_system_settings(pane: SettingsPane) {
     let spawn_result = url.map(|url| {
         let mut command = std::process::Command::new("cmd");
         command.args(["/C", "start", "", url]);
-        crate::procutil::suppress_console_window(&mut command);
+        crate::procutil::suppress_console_window_std(&mut command);
         command.spawn()
     });
 
@@ -407,7 +415,7 @@ pub fn onboarding_open_system_settings(pane: SettingsPane) {
 
 /// Screen 4 — subscribes to `model_download_progress` and immediately pushes
 /// a synchronous status snapshot first, so a screen that mounts after the
-/// download already finished (or already started, per Wave-5-Patch's eager
+/// download already finished (or already started, due to the eager
 /// `warm_up()`) doesn't sit on a stuck 0% bar waiting for a change event that
 /// may never come again. No separate "start" command exists — see
 /// `ModelDownloadStatus`'s doc comment for why.

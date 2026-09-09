@@ -1,10 +1,10 @@
-//! Domain types for the v1 storage slice. IDs are plain `String` UUIDs for
-//! this wave rather than the newtype wrappers LLD-01 §3.1 sketches — path
+//! Domain types for the v1 storage slice. IDs are plain `String` UUIDs
+//! rather than newtype wrappers — path
 //! traversal safety is enforced at the `fs::paths` boundary regardless
 //! (`validate_uuid`), and a full `ProjectId`/`ConversationId` newtype system
-//! is deferred to whichever wave first needs it on the `tauri-specta`
-//! boundary. `Conversation` serves both list and detail reads for the same
-//! reason — LLD-01's `ConversationSummary`/`Conversation` split is a
+//! is deferred until something on the `tauri-specta`
+//! boundary actually needs it. `Conversation` serves both list and detail reads
+//! for the same reason — a `ConversationSummary`/`Conversation` split would be a
 //! frontend read-shape optimization, not a storage-layer correctness need.
 
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,7 @@ pub enum ConversationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Type)]
 pub struct Conversation {
     pub id: String,
-    /// Recordings never require a project (W15 design decision) — `None`
+    /// Recordings never require a project — `None`
     /// means unfiled, a first-class, permanent state, not a placeholder.
     pub project_id: Option<String>,
     pub title: String,
@@ -98,8 +98,8 @@ pub enum ConversationOrder {
     StartedAsc,
 }
 
-/// W18: every field past `include_archived` was added to make the six
-/// unbounded `list_conversations` callers bounded. `limit: None` still means
+/// Every field past `include_archived` exists to make `list_conversations`
+/// callers bounded. `limit: None` still means
 /// "every row" and is deliberately kept, not removed — a few internal callers
 /// (crash-recovery scans) genuinely want the whole set and are bounded by
 /// something other than library size. What is *not* allowed is a UI surface
@@ -110,8 +110,8 @@ pub struct ConversationFilter {
     /// `None` = every project (Everything scope). Note this is not the same
     /// as `unfiled_only`: `None` includes filed *and* unfiled conversations.
     pub project_id: Option<String>,
-    /// `project_id IS NULL` — the Recordings page's "unfiled" scope (W15:
-    /// unfiled is a permanent first-class state, never a project).
+    /// `project_id IS NULL` — the Recordings page's "unfiled" scope
+    /// (unfiled is a permanent first-class state, never a project).
     pub unfiled_only: bool,
     pub include_archived: bool,
     pub starred_only: bool,
@@ -168,17 +168,54 @@ pub enum HintSource {
     Manual,
 }
 
+/// Which of the three extracted-item tables a row lives in.
+///
+/// Exists so delete and edit are one code path across all three rather than
+/// three near-identical ones: the tables differ only in their text column, and
+/// a closed enum makes "some fourth kind" unrepresentable instead of a runtime
+/// string comparison that silently matches nothing. The wire values are the
+/// `deleted_extractions.kind` values verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(rename_all = "snake_case")]
+pub enum ExtractionKind {
+    ActionItem,
+    Decision,
+    OpenQuestion,
+}
+
+impl ExtractionKind {
+    /// `(table, text column)`. Both are compile-time constants chosen by the
+    /// enum, never interpolated from caller input — the only reason building
+    /// these statements with `format!` is safe.
+    pub(crate) fn table_and_text_column(self) -> (&'static str, &'static str) {
+        match self {
+            Self::ActionItem => ("action_items", "text"),
+            Self::Decision => ("decisions", "statement"),
+            Self::OpenQuestion => ("open_questions", "question"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Type)]
 pub struct ActionItem {
     pub id: String,
-    pub conv_id: String,
+    /// `None` for a standalone item added from Home or a Project page. The
+    /// column has always been nullable; this field claimed otherwise and
+    /// sqlx's lenient TEXT decode quietly handed back `""` for those rows
+    /// instead of failing, so a caller building a link from it would have
+    /// produced `/conversation/` and a dead route.
+    pub conv_id: Option<String>,
     pub text: String,
     pub assignee_hint: Option<String>,
+    /// Whether `assignee_hint` is the app's own user rather than a real
+    /// name — see the column's migration comment. `assignee_hint` always
+    /// holds a name or `null`; this is the only place "is this me" lives.
+    pub assignee_is_self: bool,
     pub assignee_source: HintSource,
     pub due_hint: Option<String>,
     pub source_ts: Option<i64>,
     pub done: bool,
-    pub dismissed: bool,
     pub added_manually: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -188,6 +225,7 @@ pub struct ActionItem {
 pub struct NewActionItem {
     pub text: String,
     pub assignee_hint: Option<String>,
+    pub assignee_is_self: bool,
     pub due_hint: Option<String>,
     pub source_ts: Option<i64>,
 }
@@ -197,24 +235,23 @@ pub struct NewDecision {
     pub statement: String,
     pub quote: Option<String>,
     pub decided_by_hint: Option<String>,
+    pub decided_by_is_self: bool,
     pub source_ts: Option<i64>,
 }
 
-/// Read model for a `decisions` row (LLD-01 §3.1 sketches this; W4's
-/// Implementation status never added it — only `ActionItem` got a read
-/// struct — because nothing read decisions back before W12b's Conversation
-/// Detail page. Added here, following `ActionItem`'s shape.
+/// Read model for a `decisions` row, following `ActionItem`'s shape.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Type)]
 pub struct Decision {
     pub id: String,
     /// `None` for a standalone decision (schema supports it — see
     /// `action_items`' migration comment — though nothing creates one yet;
-    /// only action items have a "+" as of W19).
+    /// only action items currently have a "+" for adding one manually).
     pub conv_id: Option<String>,
     pub project_id: Option<String>,
     pub statement: String,
     pub quote: Option<String>,
     pub decided_by_hint: Option<String>,
+    pub decided_by_is_self: bool,
     pub source_ts: Option<i64>,
     pub added_manually: bool,
     pub created_at: i64,
@@ -224,6 +261,7 @@ pub struct Decision {
 pub struct NewOpenQuestion {
     pub question: String,
     pub raised_by_hint: Option<String>,
+    pub raised_by_is_self: bool,
     pub source_ts: Option<i64>,
 }
 
@@ -234,9 +272,11 @@ pub struct OpenQuestion {
     pub conv_id: String,
     pub question: String,
     pub raised_by_hint: Option<String>,
+    pub raised_by_is_self: bool,
     /// Who owes the answer — distinct from `raised_by_hint`, which records
     /// who asked and is never edited. The model never populates this in v1.
     pub owner_hint: Option<String>,
+    pub owner_is_self: bool,
     pub owner_source: HintSource,
     pub source_ts: Option<i64>,
     pub resolved_conv_id: Option<String>,
@@ -245,7 +285,43 @@ pub struct OpenQuestion {
     pub created_at: i64,
 }
 
-/// Agent-suggested bookmark (LLD-05 §4.3, §10 Q1). Never deletes a
+/// A row lifted out of one of the extraction tables, whole, so it can be put
+/// back byte-for-byte.
+///
+/// Adjacently tagged rather than three separate delete commands: the three
+/// tables carry genuinely different columns, and an enum keeps the caller —
+/// and the generated TypeScript — from having to know which one it is holding
+/// before it can hand it back.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", content = "item", rename_all = "snake_case")]
+pub enum DeletedExtraction {
+    ActionItem(ActionItem),
+    Decision(Decision),
+    OpenQuestion(OpenQuestion),
+}
+
+impl DeletedExtraction {
+    pub fn kind(&self) -> ExtractionKind {
+        match self {
+            Self::ActionItem(_) => ExtractionKind::ActionItem,
+            Self::Decision(_) => ExtractionKind::Decision,
+            Self::OpenQuestion(_) => ExtractionKind::OpenQuestion,
+        }
+    }
+
+    /// The conversation the item belonged to, and the text it was tombstoned
+    /// under — the pair that identifies its tombstone. `None` for a
+    /// standalone item, which never had one.
+    pub fn tombstone_key(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::ActionItem(i) => i.conv_id.as_deref().map(|c| (c, i.text.as_str())),
+            Self::Decision(d) => d.conv_id.as_deref().map(|c| (c, d.statement.as_str())),
+            Self::OpenQuestion(q) => Some((q.conv_id.as_str(), q.question.as_str())),
+        }
+    }
+}
+
+/// Agent-suggested bookmark. Never deletes a
 /// user-tapped `bookmarks` row — [`crate::db::service::StorageService::replace_extraction_rows`]
 /// only inserts rows whose `(conv_id, ts_ms, label)` isn't already present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,7 +331,7 @@ pub struct NewBookmark {
 }
 
 /// Extraction agent output for one conversation, written in a single
-/// transaction (LLD-01 §4.4) — never a partial set of rows.
+/// transaction — never a partial set of rows.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractionBundle {
     pub action_items: Vec<NewActionItem>,
@@ -275,6 +351,11 @@ pub enum ChatScopeType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewChatSession {
+    /// Minted by the *caller* (the frontend), not here — see
+    /// CHAT_REDESIGN_DESIGN.md §3. Local chat state keys off it from the
+    /// first keystroke, and it is what makes a repeated first send
+    /// idempotent instead of creating a second chat.
+    pub id: String,
     pub runner_id: Option<String>,
     pub scope_type: ChatScopeType,
     /// Required unless `scope_type` is `Everything`.
@@ -282,24 +363,22 @@ pub struct NewChatSession {
     pub title: Option<String>,
 }
 
-/// `Type` (W13-history wave): exposed to the frontend by
-/// `chat_start_new_session`/`chat_list_sessions` (design doc §2.5, §4).
+/// `Type`: exposed to the frontend by
+/// `chat_resolve_session`/`chat_list_sessions`.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Type)]
 pub struct ChatSession {
+    /// Mnemos' own id. Exists before any runner process does.
     pub id: String,
     pub runner_id: Option<String>,
     pub scope_type: ChatScopeType,
     pub scope_id: Option<String>,
-    pub session_id: Option<String>,
-    pub epoch: String,
-    pub status: String,
+    /// The *runner's* own session id — Claude Code's `--session-id` /
+    /// `--resume` value. `None` until a runner has actually started for
+    /// this chat. Distinct from `id`; see the `chat_sessions` DDL.
+    pub runner_session_id: Option<String>,
     pub title: Option<String>,
-    /// `None` = this is the active session for its `(runner, scope)` —
-    /// `find_chat_session_by_scope` only ever returns one of these.
-    /// `Some(id)` = a previous "New chat" (`start_new_session`) replaced
-    /// this row with `id`; still renameable/listable, just not the one a
-    /// new message resolves to (design doc §2.5).
-    pub superseded_by_id: Option<String>,
+    /// Durable items journaled for this chat. A projection for display —
+    /// never a source of `chat_journal.seq`.
     pub message_count: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
@@ -308,21 +387,19 @@ pub struct ChatSession {
     pub updated_at: i64,
 }
 
-/// One journal row's payload. The event shape itself belongs to LLD-07/12c;
-/// this layer only guarantees journal-then-projection atomicity around it.
-/// `Type` (W13-history wave): exposed to the frontend via
-/// `chat_get_session_history` so `MessageList` can project real history
-/// instead of the permanent `[]` stub it used before.
+/// One journal row's payload; this layer only guarantees
+/// journal-then-projection atomicity around it.
+/// `Type`: exposed to the frontend via
+/// `chat_get_session_history` so `MessageList` can project real history.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, Type)]
 pub struct ChatEventRecord {
     pub session_id: String,
-    pub epoch: String,
     pub seq: i64,
     pub ts: i64,
     pub event_json: serde_json::Value,
 }
 
-/// One row of the `mnemos-mcp-server` (W16 / LLD-08 §3.1) project listing —
+/// One row of the `mnemos-mcp-server` project listing —
 /// `Project` itself carries no aggregate counters, so `list_projects` joins
 /// this in-memory by `project_id`.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -333,10 +410,10 @@ pub struct ProjectActivityStat {
 }
 
 /// Filter for [`crate::db::service::StorageService::list_action_items_global`]
-/// (LLD-08 §3.6) — distinct from the per-conversation `list_action_items`
-/// W12b added; this one fans out across every conversation (optionally
+/// — distinct from the per-conversation `list_action_items`;
+/// this one fans out across every conversation (optionally
 /// scoped to one project) via a single joined query rather than N per-conversation
-/// calls. `contact_id` from the LLD-08 sketch is intentionally absent: there
+/// calls. `contact_id` is intentionally absent: there
 /// is no `speakers`/`contacts` table until v1.3 diarization, so the MCP tool
 /// layer rejects that arg before it would ever reach this filter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -344,12 +421,19 @@ pub struct ActionItemFilter {
     pub project_id: Option<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,
-    pub include_done: bool,
-    /// Home's "Your to-dos" — exact match on `assignee_hint = 'You'`, the
-    /// literal string the model (and the assignee picker) writes for the
-    /// user's own speech. Not a contact id: there is no contacts table until
-    /// v1.3, and "You" is the one value that is always unambiguous regardless
-    /// of who is actually using the app.
+    /// `None` matches both — the MCP `list_action_items` tool's only use for
+    /// this filter, since an agent that doesn't specify a status reasonably
+    /// expects everything. `Some(done)` is an exact match, which is the only
+    /// thing Home's and the Project page's Open/Done tabs ever want: each
+    /// tab is one exclusive query, never "all," so their own command params
+    /// are a plain mandatory `bool` that always resolves to `Some`.
+    pub done: Option<bool>,
+    /// Home's "Your to-dos" — matches `assignee_is_self = 1`, set by the
+    /// model (and the assignee picker) whenever an item is the app's own
+    /// user's, regardless of what name is stored in `assignee_hint`. Not a
+    /// contact id: there is no contacts table until v1.3, and a dedicated
+    /// boolean is the one thing that's always unambiguous regardless of who
+    /// is actually using the app or what they're named.
     pub assigned_to_me: bool,
     pub limit: u32,
     /// Rows to skip before `limit` — the paging cursor for these lists.
@@ -366,20 +450,20 @@ pub struct ActionItemWithSource {
     pub project_id: Option<String>,
     pub text: String,
     pub assignee_hint: Option<String>,
+    pub assignee_is_self: bool,
     pub assignee_source: HintSource,
     pub due_hint: Option<String>,
     pub source_ts: Option<i64>,
     pub done: bool,
-    pub dismissed: bool,
     pub created_at: i64,
 }
 
 /// Filter for [`crate::db::service::StorageService::list_decisions_global`]
-/// — same rationale as [`ActionItemFilter`]. Added in W17c for Project
-/// Memory's Decisions section (05_PROJECT_MEMORY.md §2), which is the one
-/// reactive section that had no cross-conversation read: action items and
-/// open questions both got theirs in W16 for the MCP tools, decisions did
-/// not because no MCP tool needed them.
+/// — same rationale as [`ActionItemFilter`]. Backs Project
+/// Memory's Decisions section, the one reactive section that has no
+/// cross-conversation read otherwise: action items and open questions both
+/// got theirs for the MCP tools, decisions did not because no MCP tool
+/// needed them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DecisionFilter {
     pub project_id: Option<String>,
@@ -418,9 +502,11 @@ pub struct OpenQuestionWithSource {
     pub project_id: Option<String>,
     pub question: String,
     pub raised_by_hint: Option<String>,
+    pub raised_by_is_self: bool,
     /// Who owes the answer — distinct from `raised_by_hint`, which records
     /// who asked and is never edited. The model never populates this in v1.
     pub owner_hint: Option<String>,
+    pub owner_is_self: bool,
     pub owner_source: HintSource,
     pub source_ts: Option<i64>,
     pub resolved_conv_id: Option<String>,
@@ -428,10 +514,10 @@ pub struct OpenQuestionWithSource {
     pub created_at: i64,
 }
 
-/// What matched an FTS5 hit (LLD-08 §3.2's `kind` enum, trimmed to the four
-/// SQLite-content kinds the W16 migration actually indexes — `transcript`
+/// What matched an FTS5 hit — trimmed to the four
+/// SQLite-content kinds the migration actually indexes; `transcript`
 /// and `summary` are filesystem content, not SQLite rows, and stay out of
-/// scope until the vector/RAG tier, W14).
+/// scope until the vector/RAG tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FtsHitKind {

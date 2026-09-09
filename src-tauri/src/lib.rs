@@ -5,6 +5,7 @@ pub mod capture;
 pub mod commands;
 pub mod db;
 pub mod error;
+pub mod events;
 pub mod fs;
 pub mod ipc;
 pub mod logging;
@@ -20,7 +21,7 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 /// Where the generated TypeScript bindings land, relative to `src-tauri/`.
-/// Checked into git; CI fails if a regen produces a diff (FRONTEND §3).
+/// Checked into git; CI fails if a regen produces a diff.
 pub const BINDINGS_PATH: &str = "../bindings/tauri.ts";
 
 /// The single specta registry. Every command and event is registered here
@@ -65,6 +66,10 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::conversation::set_action_item_assignee,
             commands::conversation::set_open_question_owner,
             commands::conversation::set_open_question_resolved,
+            commands::conversation::conversation_set_summary,
+            commands::conversation::conversation_delete_extraction_item,
+            commands::conversation::conversation_restore_extraction_item,
+            commands::conversation::conversation_set_extraction_text,
             commands::project::dashboard_get_project_pulse,
             commands::project::project_get_memory_status,
             commands::project::project_list_action_items,
@@ -73,10 +78,11 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::chat::chat_send_prompt,
             commands::chat::chat_cancel_turn,
             commands::chat::chat_get_session_history,
-            commands::chat::chat_start_new_session,
+            commands::chat::chat_delete_session,
             commands::chat::chat_rename_session,
             commands::chat::chat_list_sessions,
             commands::chat::chat_resolve_session,
+            commands::models::list_transcription_models,
             commands::onboarding::onboarding_get_status,
             commands::onboarding::onboarding_set_user_name,
             commands::onboarding::onboarding_complete,
@@ -88,8 +94,31 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::onboarding::onboarding_open_system_settings,
             commands::onboarding::onboarding_subscribe_model_download,
             commands::metrics::track_event,
+            commands::tray::tray_quit_confirmed,
+            commands::tray::app_ready,
+            commands::updater::updater_check_now,
+            commands::updater::updater_install_and_relaunch,
+            commands::updater::updater_get_settings,
+            commands::updater::updater_set_auto_check_enabled,
+            commands::meeting_detection::meeting_detection_get_settings,
+            commands::meeting_detection::meeting_detection_set_enabled,
+            commands::meeting_detection::meeting_notification_start_recording,
+            commands::meeting_detection::meeting_notification_dismiss,
+            commands::meeting_detection::meeting_notification_resize,
         ])
-        .events(collect_events![])
+        .events(collect_events![
+            events::TrayConfirmQuit,
+            events::TrayPauseRecording,
+            events::TrayResumeRecording,
+            events::TrayStopRecording,
+            events::TrayStartRecording,
+            events::LiveTranscriptionWarmup,
+            events::RecordingWarning,
+            events::ProjectMemoryUpdated,
+            events::ConversationReady,
+            events::ProcessingProgress,
+            events::ProjectMemoryRefreshFailed,
+        ])
 }
 
 /// Resolves the Python worker's working directory at runtime instead of
@@ -98,8 +127,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
 /// TODO(packaging): this only fixes the "runs from a built binary anywhere
 /// on disk, with `src-python/` copied alongside it" case — it does NOT wire
 /// up real production packaging. A proper fix still needs a bundled Python
-/// interpreter shipped via `externalBin`/`resources` in `tauri.conf.json`
-/// (LLD-02 §3), which is a much larger effort requiring testing against an
+/// interpreter shipped via `externalBin`/`resources` in `tauri.conf.json`,
+/// which is a much larger effort requiring testing against an
 /// actual built bundle. Until that lands, anyone who copies the built
 /// executable without also copying `src-python/` next to it (in the layout
 /// this function expects) still gets a worker that fails to start — this
@@ -138,23 +167,113 @@ fn worker_cwd() -> Result<std::path::PathBuf, AppError> {
     Ok(sibling)
 }
 
-/// Dev-mode worker config: a `python3` on PATH running `src-python/` in
-/// place. Production packaging (a bundled interpreter baked in by the Tauri
-/// sidecar bundler, per LLD-02 §3) is not wired up yet — no bundler config
-/// exists in `tauri.conf.json` this wave; see the LLD's "Implementation
-/// status" for why that's deferred.
-fn worker_config() -> Result<crate::ipc::python::SupervisorConfig, AppError> {
-    let python_bin = std::path::PathBuf::from(if cfg!(windows) { "python" } else { "python3" });
-    let cwd = worker_cwd()?;
+/// Locates a locally-built bundle from `PACKAGING_DESIGN.md` section A, if
+/// one exists — `src-tauri/bundled/python-<platform>-<arch>/`, either as a
+/// sibling of the running exe (the shape a real packaged resource dir will
+/// eventually have) or at its dev-tree location (so the bundle can be
+/// exercised via a plain `cargo build`/`cargo tauri dev` before real Tauri
+/// resource bundling — `tauri.conf.json`'s `bundle.resources` — is wired
+/// up; that's a separate, later step, not done here). Returns `None` when
+/// no bundle has been built, which is the common case today.
+fn bundled_python_dir() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "python-windows-x64"
+    } else if cfg!(target_os = "macos") {
+        "python-macos-arm64"
+    } else {
+        return None;
+    };
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join(name));
+        }
+    }
+    // Dev-tree fallback only — `CARGO_MANIFEST_DIR` is a compile-time
+    // constant baked into the binary at build time. Left ungated here
+    // (unlike `worker_cwd`'s equivalent fallback a few lines above), a
+    // release build carries whichever machine built it's literal path
+    // permanently, and stats it on every launch — on macOS, if that
+    // path happens to sit under the build machine's `~/Documents` (a
+    // common repo location, e.g. iCloud-synced Documents or GitHub
+    // Desktop's default clone folder), that stat trips a real TCC
+    // Documents-access prompt on every install built from such a
+    // machine, not just this dev machine. Found and fixed after a real
+    // build from this exact repo location reproduced exactly that
+    // prompt.
+    #[cfg(debug_assertions)]
+    candidates.push(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled")
+            .join(name),
+    );
+    candidates.into_iter().find(|p| p.is_dir())
+}
+
+/// Worker config: PACKAGING_DESIGN.md section B, now actually wired up.
+///
+/// Resolution order for the Python interpreter dir:
+/// 1. The real packaged resource dir (`app.path().resolve("python",
+///    BaseDirectory::Resource)`) — what a `pnpm tauri build` bundle
+///    actually has, once `tauri.<platform>.conf.json` declares
+///    `bundle.resources` pointing `bundled/python-<platform>-<arch>/` at
+///    `python/`. This is the only branch a real distributed build uses.
+/// 2. `bundled_python_dir()` — a locally-built bundle sitting next to the
+///    exe or in the dev tree, for exercising a bundle before wiring up
+///    real Tauri resource bundling (or in case `resolve` fails to find one,
+///    e.g. a platform whose resources config doesn't exist yet).
+/// 3. `python3`/`python` on PATH running `src-python/` in place — the
+///    original dev-mode behavior, unconditional fallback so dev/CI keeps
+///    working with no bundle present at all.
+fn worker_config(app: &tauri::AppHandle) -> Result<crate::ipc::python::SupervisorConfig, AppError> {
+    use tauri::path::BaseDirectory;
+
+    let resource_dir = app
+        .path()
+        .resolve("python", BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_dir());
+
+    let (python_bin, cwd) = match resource_dir.or_else(bundled_python_dir) {
+        Some(dir) => {
+            let bin = if cfg!(windows) {
+                dir.join("python.exe")
+            } else {
+                dir.join("bin").join("python3")
+            };
+            (bin, dir)
+        }
+        None => {
+            let bin = std::path::PathBuf::from(if cfg!(windows) { "python" } else { "python3" });
+            (bin, worker_cwd()?)
+        }
+    };
     let state_dir = crate::fs::paths::state_dir()?;
     #[allow(unused_mut)]
     let mut cfg = crate::ipc::python::SupervisorConfig::new(python_bin, cwd, state_dir);
-    // Dev-mode sidecar path (no bundler packaging yet — same gap as
-    // `python_bin` above; see LLD-02's "Implementation status").
+    // Swift audio sidecar: `bundle.externalBin` (PACKAGING_DESIGN.md section
+    // D, wired in `tauri.macos.conf.json`) places this binary next to the
+    // main executable itself (`Contents/MacOS/`), NOT under
+    // `Contents/Resources/` — unlike the Python interpreter above, this is
+    // not a `BaseDirectory::Resource` lookup. Verified against a real
+    // packaged `.app`: `Contents/Resources/` only had `python/` and
+    // `icon.icns`; `mnemos-audio` was sitting in `Contents/MacOS/` beside
+    // `mnemos-tauri`. `current_exe()`'s own directory is the right lookup.
     #[cfg(target_os = "macos")]
     {
-        cfg.sidecar_bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../swift/mnemos-audio/.build/release/mnemos-audio");
+        let sidecar = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("mnemos-audio")))
+            .filter(|p| p.is_file());
+        #[cfg(debug_assertions)]
+        let sidecar = sidecar.or_else(|| {
+            let dev = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../swift/mnemos-audio/.build/release/mnemos-audio");
+            dev.is_file().then_some(dev)
+        });
+        if let Some(bin) = sidecar {
+            cfg.sidecar_bin = bin;
+        }
     }
     Ok(cfg)
 }
@@ -173,7 +292,109 @@ fn typescript_config() -> specta_typescript::Typescript {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// macOS/Linux apps launched by double-clicking (Finder, Dock, a built
+/// `.app`) get a minimal `PATH` from `launchd` — roughly
+/// `/usr/bin:/bin:/usr/sbin:/sbin` plus a couple of system entries — never
+/// the user's shell rc-file additions (Homebrew, `nvm`, `cargo`, `pipx`,
+/// `~/.local/bin`, etc.). A terminal-launched process (`cargo tauri dev`,
+/// or any dev workflow run from a shell) doesn't have this problem, which
+/// is why `find_claude_binary`'s PATH scan (`ipc/runner/claude/spawn.rs`)
+/// works in dev but silently fails to find a real `claude` install once
+/// the app is actually built and launched normally — not a bug in that
+/// scan itself, a missing environment fixup before it ever runs.
+///
+/// Fixes this the same way Electron/VS Code-style apps do: resolve the
+/// user's real login-shell `PATH` once, here, before anything else in the
+/// app runs, and overwrite this process's own `PATH` with it — every
+/// subsequent PATH-based lookup (`find_claude_binary`, the dev-mode
+/// `python3` fallback in `worker_config`, anything else) benefits for
+/// free, with no changes needed at any call site. Best-effort: on any
+/// failure (unknown/broken `$SHELL`, timeout, empty output), the process's
+/// original `PATH` is left untouched rather than blocking startup or
+/// clearing it. Windows GUI apps inherit the full user `PATH` via the
+/// registry-backed environment block already — this is a no-op there.
+#[cfg(not(windows))]
+fn fix_gui_launch_path() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    // `-lc` runs the user's login rc files, which can do arbitrary
+    // path-relative work. Don't let that happen on the inherited `/` — a
+    // Finder-launched `.app` starts there, and anything an rc file does
+    // relative to the filesystem root can wander into TCC-protected user
+    // folders and surface a permission prompt the user never asked for.
+    let mut command = std::process::Command::new(&shell);
+    command
+        .args(["-lc", "echo -n \"$PATH\""])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Ok(root) = crate::fs::paths::data_root() {
+        if root.is_dir() {
+            command.current_dir(root);
+        }
+    }
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(shell = %shell, error = %e, "gui_path_fixup.spawn_failed");
+            return;
+        }
+    };
+
+    // Bounded wait — a slow/hanging shell rc file (network calls, etc.)
+    // must not block the whole app from ever starting. Polls rather than
+    // `wait_timeout` (not a std API, and not worth a new dependency for a
+    // one-shot startup check) — 3s in 50ms steps is plenty of resolution
+    // without meaningfully spinning the CPU.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                tracing::warn!(shell = %shell, "gui_path_fixup.timed_out");
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(e) => {
+                tracing::warn!(shell = %shell, error = %e, "gui_path_fixup.wait_failed");
+                break None;
+            }
+        }
+    };
+
+    let Some(status) = status else { return };
+    if !status.success() {
+        tracing::warn!(shell = %shell, "gui_path_fixup.shell_exited_nonzero");
+        return;
+    }
+    let Some(stdout) = child.stdout.take() else {
+        return;
+    };
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::BufReader::new(stdout)
+        .read_to_string(&mut buf)
+        .is_err()
+    {
+        return;
+    }
+    let resolved = buf.trim();
+    if resolved.is_empty() {
+        return;
+    }
+
+    tracing::info!(path = resolved, "gui_path_fixup.applied");
+    // SAFETY: called once, synchronously, before any other thread exists
+    // (the very first line of `run()`) — no concurrent env access possible.
+    unsafe { std::env::set_var("PATH", resolved) };
+}
+
 pub fn run() {
+    #[cfg(not(windows))]
+    fix_gui_launch_path();
+
     let builder = specta_builder();
 
     tauri::Builder::default()
@@ -183,7 +404,23 @@ pub fn run() {
         // `setup` runs); `tauri.conf.json`'s 1200x800 + `maximized: true`
         // is only the very-first-launch fallback, before any state file
         // exists yet.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Everything except `VISIBLE`. The plugin's default is `all()`, which
+        // persists whether the window was on screen and re-applies it at
+        // launch — and this app hides the window on close rather than
+        // destroying it (`commands::tray::build`), so quitting from the tray
+        // with the window closed saved `visible: false` and the *next* launch
+        // would come up with no window at all. Visibility here is transient
+        // runtime state, never a preference: Mnemos always opens showing.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
@@ -207,7 +444,7 @@ pub fn run() {
             let (storage, python, metrics) = tauri::async_runtime::block_on(async {
                 let pools = crate::db::init(&db_path).await?;
                 let service = crate::db::service::SqliteStorageService::new(pools);
-                // Crash-resume (LLD-01 §7.5) runs before any command handler
+                // Crash-resume runs before any command handler
                 // is reachable, so a half-finished delete from last session
                 // never leaves stale data visible to the UI.
                 use crate::db::service::StorageService;
@@ -233,10 +470,12 @@ pub fn run() {
                     )]),
                 );
 
-                let python = crate::ipc::python::WorkerSupervisor::spawn(worker_config()?).await?;
-                // First real reverse-RPC handler (LLD-02 §7.2 / LLD-07 §7):
-                // W5 only wired the generic dispatch mechanism with dummy
-                // test handlers.
+                let python =
+                    crate::ipc::python::WorkerSupervisor::spawn(worker_config(app.handle())?)
+                        .await?;
+                // The real reverse-RPC handler for agent extraction, invoked
+                // by the Python worker through the generic dispatch
+                // mechanism (which also supports dummy handlers for tests).
                 python.register_reverse_rpc(
                     "run_agent_extraction",
                     std::sync::Arc::new(
@@ -246,15 +485,92 @@ pub fn run() {
                 Ok::<_, AppError>((service, python, metrics))
             })?;
             app.manage(AppState::new(version, storage, python, metrics));
+            app.manage(commands::meeting_detection::MeetingDetectionState::new());
 
-            // Menu-bar / tray red-dot indicator (LLD-11 §6, v1 slice — see
-            // `commands::recording::build_tray`'s doc comment for scope).
-            commands::recording::build_tray(app)?;
+            commands::tray::build(app)?;
+
+            // Meeting auto-detect: a long-lived background watcher, not
+            // tied to any one recording (see
+            // product_docs/MEETING_AUTO_DETECT_DESIGN.md "Lifecycle") — so
+            // it starts here, once, rather than anywhere in the recording
+            // path. Gated on the same setting the Settings toggle controls,
+            // read once at launch; `meeting_detection_set_enabled` is what
+            // starts/stops it live if the user flips it later.
+            #[cfg(target_os = "macos")]
+            {
+                let watcher_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use crate::db::service::StorageService;
+                    let state = watcher_handle.state::<AppState>();
+                    let enabled = state
+                        .storage
+                        .get_setting(commands::meeting_detection::KEY_ENABLED)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    if enabled {
+                        commands::meeting_detection::start_watcher(&watcher_handle);
+                    }
+                });
+            }
+
+            // Safety net for the hidden-at-creation window above: if the
+            // frontend never reaches its `app_ready` call — a bundling
+            // mistake, a crash in a provider, a white-screen build — the app
+            // would otherwise run with no window and no way to get one. A
+            // late window is a bad launch; no window is an unusable app.
+            let reveal_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if reveal_handle
+                    .get_webview_window("main")
+                    .and_then(|w| w.is_visible().ok())
+                    == Some(false)
+                {
+                    tracing::warn!("frontend never signalled ready; revealing the window anyway");
+                    commands::tray::show_main_window(&reveal_handle);
+                }
+            });
+
+            // Update check on launch — spawned rather than awaited inline,
+            // so a slow/offline check never delays startup the way the
+            // hard storage/worker dependencies above correctly do.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = commands::updater::check_on_launch(update_handle).await {
+                    tracing::warn!(error = %err, "launch-time update check failed");
+                }
+            });
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Closing the window hides it rather than destroying it
+            // (`commands::tray::build`'s `CloseRequested` handler), which is
+            // what keeps the warm Parakeet worker alive and the tray clock
+            // running. macOS keeps the app in the Dock in that state, and
+            // clicking that Dock icon raises `Reopen` — without handling it
+            // the icon is inert and the only way back into a "closed" app is
+            // the tray menu or force-quitting and relaunching.
+            //
+            // `has_visible_windows` is true when macOS already had a window
+            // to raise and did it itself; showing again would be harmless but
+            // it would also steal focus from whichever window the user was
+            // actually pointing at.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                commands::tray::show_main_window(app);
+            }
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]

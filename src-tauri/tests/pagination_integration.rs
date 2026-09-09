@@ -1,4 +1,4 @@
-//! W18 — the bounded read contract (`ConversationFilter`'s `limit`/`offset`/
+//! The bounded read contract (`ConversationFilter`'s `limit`/`offset`/
 //! `order`/filters, and the `count_*` methods that back every "N remaining"
 //! label).
 //!
@@ -245,12 +245,14 @@ async fn manual_assignments_survive_re_extraction_and_model_ones_do_not() {
             NewActionItem {
                 text: "send the SOW".into(),
                 assignee_hint: Some("Sarah".into()),
+                assignee_is_self: false,
                 due_hint: None,
                 source_ts: None,
             },
             NewActionItem {
                 text: "book the room".into(),
                 assignee_hint: None,
+                assignee_is_self: false,
                 due_hint: None,
                 source_ts: None,
             },
@@ -259,6 +261,7 @@ async fn manual_assignments_survive_re_extraction_and_model_ones_do_not() {
         open_questions: vec![NewOpenQuestion {
             question: "who owns cutover?".into(),
             raised_by_hint: Some("Marcus".into()),
+            raised_by_is_self: false,
             source_ts: None,
         }],
         bookmarks: vec![],
@@ -273,12 +276,12 @@ async fn manual_assignments_survive_re_extraction_and_model_ones_do_not() {
     let items = svc.list_action_items(&conv.id).await.unwrap();
     let sow = items.iter().find(|i| i.text == "send the SOW").unwrap();
     assert_eq!(sow.assignee_source, HintSource::Model);
-    svc.set_action_item_assignee(&sow.id, Some("Priya".into()))
+    svc.set_action_item_assignee(&sow.id, Some("Priya".into()), false)
         .await
         .unwrap();
 
     let questions = svc.list_open_questions(&conv.id).await.unwrap();
-    svc.set_open_question_owner(&questions[0].id, Some("You".into()))
+    svc.set_open_question_owner(&questions[0].id, Some("Pushkar".into()), true)
         .await
         .unwrap();
 
@@ -304,7 +307,8 @@ async fn manual_assignments_survive_re_extraction_and_model_ones_do_not() {
 
     let questions = svc.list_open_questions(&conv.id).await.unwrap();
     assert_eq!(questions.len(), 1);
-    assert_eq!(questions[0].owner_hint.as_deref(), Some("You"));
+    assert_eq!(questions[0].owner_hint.as_deref(), Some("Pushkar"));
+    assert!(questions[0].owner_is_self);
     assert_eq!(questions[0].owner_source, HintSource::Manual);
     assert_eq!(
         questions[0].raised_by_hint.as_deref(),
@@ -315,7 +319,9 @@ async fn manual_assignments_survive_re_extraction_and_model_ones_do_not() {
     // Clearing an assignment is itself a manual act, not a reset to 'model' —
     // otherwise the next regeneration would happily re-guess a name the user
     // deliberately removed.
-    svc.set_action_item_assignee(&sow.id, None).await.unwrap();
+    svc.set_action_item_assignee(&sow.id, None, false)
+        .await
+        .unwrap();
     svc.replace_extraction_rows(&conv.id, bundle())
         .await
         .unwrap();
@@ -357,6 +363,7 @@ async fn open_question_paging_respects_include_resolved() {
                 .map(|i| NewOpenQuestion {
                     question: format!("q-{i:02}"),
                     raised_by_hint: None,
+                    raised_by_is_self: false,
                     source_ts: None,
                 })
                 .collect(),
@@ -468,7 +475,7 @@ async fn standalone_action_items_have_no_conversation_and_derive_no_project_by_d
 
     // Home's "+" — fully unfiled, no project either.
     let unfiled = svc
-        .insert_standalone_action_item(None, "  Book the venue  ", None)
+        .insert_standalone_action_item(None, "  Book the venue  ", None, false)
         .await
         .unwrap();
     assert_eq!(unfiled.conv_id, None);
@@ -486,7 +493,7 @@ async fn standalone_action_items_have_no_conversation_and_derive_no_project_by_d
 
     // A Project page's "+" — scoped to that project, still no conversation.
     let scoped = svc
-        .insert_standalone_action_item(Some(&project.id), "Draft the SOW", None)
+        .insert_standalone_action_item(Some(&project.id), "Draft the SOW", None, false)
         .await
         .unwrap();
     assert_eq!(scoped.conv_id, None);
@@ -499,7 +506,7 @@ async fn standalone_action_item_rejects_blank_text() {
     std::env::set_var("HOME", home.path());
     let svc = service(home.path()).await;
     assert!(svc
-        .insert_standalone_action_item(None, "   ", None)
+        .insert_standalone_action_item(None, "   ", None, false)
         .await
         .is_err());
 }
@@ -575,6 +582,7 @@ async fn standalone_action_items_are_visible_in_global_list_and_count_and_surviv
             action_items: vec![NewActionItem {
                 text: "model-derived item".into(),
                 assignee_hint: None,
+                assignee_is_self: false,
                 due_hint: None,
                 source_ts: None,
             }],
@@ -585,16 +593,16 @@ async fn standalone_action_items_are_visible_in_global_list_and_count_and_surviv
     )
     .await
     .unwrap();
-    svc.insert_standalone_action_item(Some(&project.id), "standalone, scoped", None)
+    svc.insert_standalone_action_item(Some(&project.id), "standalone, scoped", None, false)
         .await
         .unwrap();
-    svc.insert_standalone_action_item(None, "standalone, unfiled", None)
+    svc.insert_standalone_action_item(None, "standalone, unfiled", None, false)
         .await
         .unwrap();
 
-    // The scoped filter (INNER-JOIN-shaped WHERE before W19) must now surface
+    // The scoped filter must surface
     // the conversation-linked row AND the standalone-but-scoped row — this is
-    // exactly the case an INNER JOIN would have silently dropped.
+    // exactly the case an INNER-JOIN-shaped WHERE would silently drop.
     let scoped_filter = ActionItemFilter {
         project_id: Some(project.id.clone()),
         limit: 100,
@@ -625,7 +633,7 @@ async fn standalone_action_items_are_visible_in_global_list_and_count_and_surviv
 }
 
 #[tokio::test]
-async fn assigned_to_me_matches_only_the_literal_you_and_composes_with_project_scope() {
+async fn assigned_to_me_matches_only_is_self_and_composes_with_project_scope() {
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
     let svc = service(home.path()).await;
@@ -652,19 +660,22 @@ async fn assigned_to_me_matches_only_the_literal_you_and_composes_with_project_s
             action_items: vec![
                 NewActionItem {
                     text: "mine, in a project".into(),
-                    assignee_hint: Some("You".into()),
+                    assignee_hint: Some("Pushkar".into()),
+                    assignee_is_self: true,
                     due_hint: None,
                     source_ts: None,
                 },
                 NewActionItem {
                     text: "someone else's".into(),
                     assignee_hint: Some("Sarah".into()),
+                    assignee_is_self: false,
                     due_hint: None,
                     source_ts: None,
                 },
                 NewActionItem {
                     text: "unassigned".into(),
                     assignee_hint: None,
+                    assignee_is_self: false,
                     due_hint: None,
                     source_ts: None,
                 },
@@ -676,7 +687,7 @@ async fn assigned_to_me_matches_only_the_literal_you_and_composes_with_project_s
     )
     .await
     .unwrap();
-    svc.insert_standalone_action_item(None, "mine, fully unfiled", None)
+    svc.insert_standalone_action_item(None, "mine, fully unfiled", None, false)
         .await
         .unwrap();
     let unfiled_mine = svc
@@ -689,7 +700,7 @@ async fn assigned_to_me_matches_only_the_literal_you_and_composes_with_project_s
         .into_iter()
         .find(|i| i.text == "mine, fully unfiled")
         .unwrap();
-    svc.set_action_item_assignee(&unfiled_mine.id, Some("You".into()))
+    svc.set_action_item_assignee(&unfiled_mine.id, Some("Pushkar".into()), true)
         .await
         .unwrap();
 
@@ -735,10 +746,11 @@ async fn standalone_action_item_self_assigns_atomically_and_cascades_on_project_
     // both set in one write, so it can never exist unassigned-and-orphaned
     // even for a moment.
     let mine = svc
-        .insert_standalone_action_item(None, "follow up with Sarah", Some("You"))
+        .insert_standalone_action_item(None, "follow up with Sarah", Some("Pushkar"), true)
         .await
         .unwrap();
-    assert_eq!(mine.assignee_hint.as_deref(), Some("You"));
+    assert_eq!(mine.assignee_hint.as_deref(), Some("Pushkar"));
+    assert!(mine.assignee_is_self);
     assert_eq!(mine.assignee_source, HintSource::Manual);
     let visible = svc
         .list_action_items_global(ActionItemFilter {
@@ -766,7 +778,7 @@ async fn standalone_action_item_self_assigns_atomically_and_cascades_on_project_
         .await
         .unwrap();
     let scoped = svc
-        .insert_standalone_action_item(Some(&project.id), "scoped to Acme", None)
+        .insert_standalone_action_item(Some(&project.id), "scoped to Acme", None, false)
         .await
         .unwrap();
 

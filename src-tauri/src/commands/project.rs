@@ -1,7 +1,7 @@
-//! `project.*` Tauri commands (W12a, LLD-05 §3.1). Currently just
+//! `project.*` Tauri commands. Currently just
 //! `refresh_memory` — the manual-refresh thin wrapper over
-//! `memory::refresh_project` that W11 deferred (no command layer existed
-//! yet). Fires-and-returns: the actual refresh runs in a detached task and
+//! `memory::refresh_project` (no command layer existed
+//! before this). Fires-and-returns: the actual refresh runs in a detached task and
 //! reports back via `project-memory-updated` / `project-memory-refresh-failed`.
 
 use std::collections::HashMap;
@@ -9,7 +9,8 @@ use std::sync::Mutex as StdMutex;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_specta::Event;
 
 use crate::db::models::{NewProject, Page, Project, ProjectPatch};
 use crate::db::service::StorageService;
@@ -22,7 +23,7 @@ use crate::state::AppState;
 const MAX_PROJECT_NAME_LEN: usize = 80;
 
 /// Trims, rejects empty, rejects over-length. Shared by every project-name
-/// write path — `create_project` had neither check until W19; `project_set_name`
+/// write path — `create_project` had neither check for a while; `project_set_name`
 /// had only the empty check. A name typed through the UI never hits either
 /// branch (both inputs already trim/disable on empty client-side), so this is
 /// defense against anything that calls the command directly, and the only
@@ -44,18 +45,18 @@ fn validate_name(raw: &str, max_len: usize, field: &str) -> Result<String, AppEr
     Ok(trimmed.to_string())
 }
 
-/// `project_memory.json`'s shape (LLD-05 §5.3 / `pages/05_PROJECT_MEMORY.md`
-/// "Storage schema"). Read-only render this wave — the inline-editable
-/// prose blocks §Editing behavior describes are a later wave.
+/// `project_memory.json`'s shape (`pages/05_PROJECT_MEMORY.md`
+/// "Storage schema"). Read-only render for now — the inline-editable
+/// prose blocks the "Editing behavior" section describes come later.
 ///
 /// `supersessions` stays untyped `Value` deliberately, matching
 /// `ipc::python::ExtractMemoryResponse`'s own `Vec<Value>` — it comes
 /// straight from the worker's LLM response with no schema enforced on it
 /// anywhere in the pipeline, so a typed struct here would be one bad
-/// generation away from failing to parse the whole file (real bug hit this
-/// wave: `last_refresh_at` is `unix_now()`, an `i64`, not the ISO-string the
-/// page doc's example sketch showed — `memory::refresh_project` writes it
-/// directly, verified against a real `project_memory.json` on disk).
+/// generation away from failing to parse the whole file. Note `last_refresh_at`
+/// is `unix_now()`, an `i64`, not the ISO-string the page doc's example
+/// sketch showed — `memory::refresh_project` writes it directly, verified
+/// against a real `project_memory.json` on disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ProjectMemory {
     pub overview_markdown: String,
@@ -66,8 +67,8 @@ pub struct ProjectMemory {
     pub last_refresh_runner: Option<String>,
 }
 
-/// Every non-deleted project, pinned first then last-active (LLD-01's
-/// `list_projects` ordering) — backs the left nav's project tree.
+/// Every non-deleted project, pinned first then last-active (`list_projects`'s
+/// ordering) — backs the left nav's project tree.
 #[tauri::command]
 #[specta::specta]
 pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, AppError> {
@@ -82,7 +83,7 @@ pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, A
         .await
 }
 
-/// Real "+New Project" (replaces the W6 stub toast). Name-only in v1 — the
+/// Real "+New Project" (replaces the earlier stub toast). Name-only in v1 — the
 /// description field exists on the model but no UI writes it yet.
 #[tauri::command]
 #[specta::specta]
@@ -161,8 +162,8 @@ pub struct RefreshHandle {
     pub batch_signature: String,
 }
 
-/// "A second `project_refresh_memory` for the same project within 5s is a
-/// no-op" (LLD-05 §3.1). Keyed in-memory, not persisted — a restart clearing
+/// A second `project_refresh_memory` for the same project within 5s is a
+/// no-op. Keyed in-memory, not persisted — a restart clearing
 /// it just means the next call isn't debounced, which is harmless.
 #[derive(Default)]
 pub struct RefreshDebounce {
@@ -186,7 +187,7 @@ fn now_ms() -> i64 {
 
 /// Manual refresh: flushes the pending-count immediately (union of whatever
 /// conversations are currently pending for this project) and enqueues
-/// `refresh_project_memory`. Debounced per §3.1 — a repeat call inside the
+/// `refresh_project_memory`. Debounced — a repeat call inside the
 /// 5s window is a no-op that returns the already-enqueued handle instead of
 /// starting a second refresh.
 #[tauri::command]
@@ -253,13 +254,11 @@ pub async fn project_refresh_memory(
                 let _ = crate::memory::clear_pending(&state.storage, &project_id_for_task).await;
                 let _ =
                     crate::memory::set_last_error(&state.storage, &project_id_for_task, None).await;
-                let _ = app_for_task.emit(
-                    "project-memory-updated",
-                    serde_json::json!({
-                        "project_id": project_id_for_task,
-                        "significant_change": outcome.significant_change,
-                    }),
-                );
+                let _ = crate::events::ProjectMemoryUpdated {
+                    project_id: project_id_for_task,
+                    significant_change: outcome.significant_change,
+                }
+                .emit(&app_for_task);
             }
             Err(err) => {
                 tracing::error!(project_id = project_id_for_task, error = %err, "project.refresh_memory_failed");
@@ -269,10 +268,11 @@ pub async fn project_refresh_memory(
                     Some(&err.to_string()),
                 )
                 .await;
-                let _ = app_for_task.emit(
-                    "project-memory-refresh-failed",
-                    serde_json::json!({ "project_id": project_id_for_task, "error_kind": err.to_string() }),
-                );
+                let _ = crate::events::ProjectMemoryRefreshFailed {
+                    project_id: project_id_for_task,
+                    error_kind: err.to_string(),
+                }
+                .emit(&app_for_task);
             }
         }
     });
@@ -297,12 +297,12 @@ pub async fn project_refresh_memory(
 /// queries `list_conversations` for its Conversations section, so the
 /// frontend joins locally instead of paying for a wider query here.
 ///
-/// W18 split these into two paged commands. They used to be fetched together
-/// under a shared `PROJECT_EXTRACTION_LIMIT = 500` ceiling that truncated
-/// silently — the page showed 500 rows and said nothing about the rest. They
-/// are separate now because the two lists page independently: decisions read
-/// forwards from the oldest and reveal *earlier* entries, while open
-/// questions read newest-first and have an Open/Resolved split.
+/// These are two paged commands because the two lists page independently:
+/// decisions read forwards from the oldest and reveal *earlier* entries,
+/// while open questions read newest-first and have an Open/Resolved split. A
+/// shared `PROJECT_EXTRACTION_LIMIT = 500` ceiling that fetched both together
+/// would truncate silently — the page showing 500 rows and saying nothing
+/// about the rest.
 /// Default page sizes, matching what the Project page reveals in one step.
 const PROJECT_PAGE_DEFAULT: u32 = 20;
 /// Ceiling on one page, the same guarantee `MAX_CONVERSATION_PAGE` gives:
@@ -376,8 +376,8 @@ const PULSE_WINDOW_DAYS: i64 = 7;
 /// Eligible projects (>=5 conversations), sorted by recent activity,
 /// each with its decision/open-question counts over the last
 /// `PULSE_WINDOW_DAYS` days. One round trip — the alternative is one query
-/// per eligible project from the frontend, which is the same N+1 shape W18
-/// spent its whole scope removing from the conversation lists.
+/// per eligible project from the frontend, which is the same N+1 shape
+/// already removed from the conversation lists.
 #[tauri::command]
 #[specta::specta]
 pub async fn dashboard_get_project_pulse(
@@ -461,20 +461,21 @@ pub async fn project_list_decisions(
 
 /// One page of a project's action items — the model-derived ones (via the
 /// conversations join) and the standalone ones added directly from this
-/// page's own "+". `include_done` splits Open/Done the same way Conversation
-/// Detail's own action items do.
+/// page's own "+". `done` is an exact match — see `list_my_action_items`'s
+/// doc comment for why this command's param is a plain mandatory `bool`
+/// rather than the storage layer's `Option<bool>`.
 #[tauri::command]
 #[specta::specta]
 pub async fn project_list_action_items(
     state: State<'_, AppState>,
     project_id: String,
-    include_done: bool,
+    done: bool,
     limit: Option<u32>,
     offset: u32,
 ) -> Result<Page<crate::db::models::ActionItemWithSource>, AppError> {
     let filter = crate::db::models::ActionItemFilter {
         project_id: Some(project_id),
-        include_done,
+        done: Some(done),
         limit: clamp_page(limit),
         offset,
         ..Default::default()
@@ -489,7 +490,7 @@ pub async fn project_list_action_items(
 
 /// One page of a project's open questions, newest first.
 /// `resolved_only` backs the Open/Resolved split. The `include_resolved`
-/// filter has existed since W16 and no caller had ever set it, so every
+/// filter existed for a while with no caller ever setting it, so every
 /// resolved question stayed in the Open list forever; the split needs the
 /// complementary predicate too, so each tab pages and counts on its own.
 #[tauri::command]

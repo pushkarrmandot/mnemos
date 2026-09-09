@@ -1,4 +1,4 @@
-//! Integration test for `mnemos-mcp-server` (W16 / LLD-08 §10.2): spawns the
+//! Integration test for `mnemos-mcp-server`: spawns the
 //! real built binary as a child process, drives it over stdio with a
 //! minimal hand-rolled MCP JSON-RPC client, and asserts against real seeded
 //! SQLite + filesystem data — never mocks `StorageService`.
@@ -29,7 +29,10 @@ struct McpClient {
 
 impl McpClient {
     fn spawn(data_dir: &std::path::Path) -> Self {
-        let bin = env!("CARGO_BIN_EXE_mnemos-mcp-server");
+        // Underscored: Cargo derives this variable from the `[[bin]]` name,
+        // which is `mnemos_mcp_server` so the built .exe matches the PDB
+        // filename rustc emits — see that target's comment in Cargo.toml.
+        let bin = env!("CARGO_BIN_EXE_mnemos_mcp_server");
         let mut child = Command::new(bin)
             .arg("--data-dir")
             .arg(data_dir)
@@ -123,6 +126,7 @@ async fn seed(dir: &std::path::Path) {
                 action_items: vec![NewActionItem {
                     text: "Send updated BOM to procurement".into(),
                     assignee_hint: Some("Sam".into()),
+                    assignee_is_self: false,
                     due_hint: Some("next Friday".into()),
                     source_ts: Some(1_700_000_500),
                 }],
@@ -130,11 +134,13 @@ async fn seed(dir: &std::path::Path) {
                     statement: "Target retail price is €25".into(),
                     quote: None,
                     decided_by_hint: Some("Priya".into()),
+                    decided_by_is_self: false,
                     source_ts: Some(1_700_000_600),
                 }],
                 open_questions: vec![NewOpenQuestion {
                     question: "Can we hit €25 with a backlit remote?".into(),
                     raised_by_hint: Some("Sam".into()),
+                    raised_by_is_self: false,
                     source_ts: Some(1_700_000_700),
                 }],
                 bookmarks: vec![],

@@ -1,18 +1,18 @@
-//! `conversation.*` Tauri commands. W12a shipped `retry_step("extraction")`
-//! — the thin command wrapper over `memory::extract_conversation` that W11
-//! deferred because no `process_conversation` orchestrator existed yet for
-//! it to hook into. W12b (this wave) adds `get_conversation_detail`, the
+//! `conversation.*` Tauri commands: `retry_step("extraction")`, the thin
+//! command wrapper over `memory::extract_conversation`, plus
+//! `get_conversation_detail`, the
 //! single read the Conversation Detail page uses to render everything but
 //! live processing progress (which stays event-driven — see
 //! `processing-progress` in `commands::recording`).
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_specta::Event;
 
 use crate::db::models::{
-    ActionItem, Conversation, ConversationFilter, ConversationStatus, Decision, NewActionItem,
-    OpenQuestion, Page, PipelineStep,
+    ActionItem, Conversation, ConversationFilter, ConversationStatus, Decision, DeletedExtraction,
+    ExtractionKind, NewActionItem, OpenQuestion, Page, PipelineStep,
 };
 use crate::db::service::StorageService;
 use crate::error::AppError;
@@ -25,9 +25,9 @@ use crate::state::AppState;
 const MAX_CONVERSATION_TITLE_LEN: usize = 200;
 
 /// Trims, rejects empty, rejects over-length. Mirrors `commands::project`'s
-/// `validate_name` — `conversation_set_title` had no server-side check of any
-/// kind until W19 (the frontend's `EditableTitle` trims/disables-on-empty,
-/// but the command itself did not).
+/// `validate_name` — the frontend's `EditableTitle` also
+/// trims/disables-on-empty, but the command itself needs its own
+/// server-side check too.
 fn validate_name(raw: &str, max_len: usize, field: &str) -> Result<String, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -51,9 +51,8 @@ pub enum RetryableStep {
     Extraction,
 }
 
-/// One turn of `transcript.json` (LLD-03 §6.2's real shape, verified against
-/// `mnemos_worker/jobs/process_conversation.py::merge_transcripts` — not the
-/// LLD's sketch, which this wave's brief flagged as possibly stale).
+/// One turn of `transcript.json`, verified against
+/// `mnemos_worker/jobs/process_conversation.py::merge_transcripts`.
 /// `speaker_label` is `"You"` (mic) / `"Them"` (system) only in v1 — no
 /// diarization model runs yet, so `speaker_label_source` is always
 /// `"source_file"` and `contact_id` is always `null`.
@@ -76,7 +75,7 @@ pub struct TranscriptDoc {
     pub turns: Vec<TranscriptTurn>,
 }
 
-/// Everything Conversation Detail (W12b, LLD-11 §3.2) renders in one round
+/// Everything Conversation Detail renders in one round
 /// trip. `transcript`/`summary_markdown` are `None` until the pipeline has
 /// written them (`transcribing`/`extracting` respectively) — the route
 /// falls back to `<ProcessingOverlay>` + `processing-progress` events for
@@ -86,7 +85,7 @@ pub struct TranscriptDoc {
 pub struct ConversationDetail {
     pub conversation: Conversation,
     /// `None` when the conversation has no project assigned — a permanent,
-    /// valid state (W15 design decision), not "not loaded yet".
+    /// valid state, not "not loaded yet".
     pub project_name: Option<String>,
     pub pipeline_step: Option<PipelineStep>,
     pub pipeline_error: Option<String>,
@@ -98,14 +97,14 @@ pub struct ConversationDetail {
 }
 
 /// Assigns or reassigns a conversation's project, `None` meaning "no
-/// project" — always a valid, permanent choice (W15 design decision), never
+/// project" — always a valid, permanent choice, never
 /// gated on recording having stopped. Purely a DB update: conversation
 /// directories are flat and keyed by id alone
 /// (`fs::paths::recordings_root`), so there is no filesystem move tied to
 /// this anymore. If this conversation is still actively recording, also
 /// updates the live session's cached `project_id` — `stop_recording`'s
 /// post-pipeline memory-refresh trigger reads that cached value to know
-/// which project's memory doc to refresh (LLD-11: the project chip is
+/// which project's memory doc to refresh (the project chip is
 /// editable "before, during, after recording, or never").
 #[tauri::command]
 #[specta::specta]
@@ -129,7 +128,7 @@ pub async fn conversation_set_project(
         .recording
         .resync_project(&conversation_id, project_id.clone());
 
-    // W19: queues the conversation into the *new* project's normal
+    // Queues the conversation into the *new* project's normal
     // pending-refresh batch, same mechanism `maybe_auto_refresh` already
     // uses after a recording finishes processing — so its decisions/action
     // items/open questions (already correct for free, via the join) get
@@ -163,13 +162,11 @@ pub async fn conversation_set_project(
             .await;
             match result {
                 Ok(Some(outcome)) => {
-                    let _ = app_for_task.emit(
-                        "project-memory-updated",
-                        serde_json::json!({
-                            "project_id": new_project_id,
-                            "significant_change": outcome.significant_change,
-                        }),
-                    );
+                    let _ = crate::events::ProjectMemoryUpdated {
+                        project_id: new_project_id,
+                        significant_change: outcome.significant_change,
+                    }
+                    .emit(&app_for_task);
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -178,10 +175,11 @@ pub async fn conversation_set_project(
                         error = %err,
                         "conversation.set_project_auto_refresh_failed"
                     );
-                    let _ = app_for_task.emit(
-                        "project-memory-refresh-failed",
-                        serde_json::json!({ "project_id": new_project_id, "error_kind": err.to_string() }),
-                    );
+                    let _ = crate::events::ProjectMemoryRefreshFailed {
+                        project_id: new_project_id,
+                        error_kind: err.to_string(),
+                    }
+                    .emit(&app_for_task);
                 }
             }
         });
@@ -193,13 +191,13 @@ pub async fn conversation_set_project(
 /// Hard ceiling on a single page, applied no matter what the caller asks for.
 /// The frontend is the only caller and always sets a sane `limit`, but this is
 /// the layer where "unbounded" stops being expressible from outside — a bug or
-/// a future caller cannot reintroduce the full-table read this wave removed.
+/// a future caller cannot reintroduce a full-table read here.
 const MAX_CONVERSATION_PAGE: u32 = 200;
 
 /// Lists conversations — `project_id: None` returns every conversation
 /// regardless of project (Dashboard's "Recent Conversations", which is the
-/// permanent home for unfiled conversations, not a stopgap — W15 design
-/// decision), `Some(id)` scopes to one project (Project Detail), and
+/// permanent home for unfiled conversations, not a stopgap), `Some(id)`
+/// scopes to one project (Project Detail), and
 /// `unfiled_only` scopes to conversations with no project at all.
 ///
 /// Returns one page plus the total it was drawn from, so the caller can
@@ -230,9 +228,9 @@ pub async fn list_conversations(
 }
 
 /// Just the size of a scope, for surfaces that render a number and no rows —
-/// the left nav's per-project badges and the Recordings header. Rendering
-/// "128" used to mean fetching 128 rows and taking `.length`, per expanded
-/// project, on every nav render.
+/// the left nav's per-project badges and the Recordings header. A cheap
+/// count-only endpoint avoids fetching every row and taking `.length`, per
+/// expanded project, on every nav render.
 #[tauri::command]
 #[specta::specta]
 pub async fn count_conversations(
@@ -246,9 +244,9 @@ pub async fn count_conversations(
 /// page's "+" (`project_id: Some`). No conversation, so no `conversationId`
 /// param: there is nothing for this command to attach the item to.
 ///
-/// `assignee_hint` lets Home self-assign ("You") in the same write that
-/// creates the row — see `insert_standalone_action_item`'s comment for why
-/// that has to be atomic rather than a create-then-assign chain.
+/// `assignee_hint`/`assignee_is_self` let Home self-assign in the same write
+/// that creates the row — see `insert_standalone_action_item`'s comment for
+/// why that has to be atomic rather than a create-then-assign chain.
 #[tauri::command]
 #[specta::specta]
 pub async fn create_standalone_action_item(
@@ -256,10 +254,16 @@ pub async fn create_standalone_action_item(
     project_id: Option<String>,
     text: String,
     assignee_hint: Option<String>,
+    assignee_is_self: bool,
 ) -> Result<crate::db::models::ActionItemWithSource, AppError> {
     let result = state
         .storage
-        .insert_standalone_action_item(project_id.as_deref(), &text, assignee_hint.as_deref())
+        .insert_standalone_action_item(
+            project_id.as_deref(),
+            &text,
+            assignee_hint.as_deref(),
+            assignee_is_self,
+        )
         .await;
     if result.is_ok() {
         state.metrics.track(
@@ -278,19 +282,22 @@ pub async fn create_standalone_action_item(
 }
 
 /// One page of the action items assigned to the user, across every project
-/// and every unfiled conversation — Home's "Your to-dos". `include_done`
-/// splits Open/Done the same way every other action-item list does.
+/// and every unfiled conversation — Home's "Your to-dos". `done` is an exact
+/// match, not a superset flag: Home's Open/Done tabs are two exclusive
+/// queries, never "everything," so this command's own param is a plain
+/// mandatory `bool` (unlike the storage-layer `ActionItemFilter.done`, which
+/// is `Option<bool>` for the MCP tool's "no restriction" case).
 #[tauri::command]
 #[specta::specta]
 pub async fn list_my_action_items(
     state: State<'_, AppState>,
-    include_done: bool,
+    done: bool,
     limit: Option<u32>,
     offset: u32,
 ) -> Result<Page<crate::db::models::ActionItemWithSource>, AppError> {
     let filter = crate::db::models::ActionItemFilter {
         assigned_to_me: true,
-        include_done,
+        done: Some(done),
         limit: limit.unwrap_or(20).clamp(1, 200),
         offset,
         ..Default::default()
@@ -314,10 +321,11 @@ pub async fn set_action_item_assignee(
     state: State<'_, AppState>,
     item_id: String,
     assignee_hint: Option<String>,
+    assignee_is_self: bool,
 ) -> Result<ActionItem, AppError> {
     state
         .storage
-        .set_action_item_assignee(&item_id, normalize_hint(assignee_hint))
+        .set_action_item_assignee(&item_id, normalize_hint(assignee_hint), assignee_is_self)
         .await
 }
 
@@ -329,10 +337,11 @@ pub async fn set_open_question_owner(
     state: State<'_, AppState>,
     question_id: String,
     owner_hint: Option<String>,
+    owner_is_self: bool,
 ) -> Result<OpenQuestion, AppError> {
     state
         .storage
-        .set_open_question_owner(&question_id, normalize_hint(owner_hint))
+        .set_open_question_owner(&question_id, normalize_hint(owner_hint), owner_is_self)
         .await
 }
 
@@ -347,6 +356,68 @@ pub async fn set_open_question_resolved(
     state
         .storage
         .set_open_question_resolved(&question_id, resolved_by_conversation_id.as_deref())
+        .await
+}
+
+/// Saves a summary the user rewrote by hand.
+///
+/// Writing `summary.md` is all this needs to do: `memory::summary_is_user_edited`
+/// decides whether a later regeneration may overwrite the file by comparing
+/// its mtime against `extraction.json`'s, so the edit protects itself the
+/// moment it lands. No flag to set and none to forget to set.
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_set_summary(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    summary_markdown: String,
+) -> Result<(), AppError> {
+    state
+        .storage
+        .write_summary(&conversation_id, &summary_markdown)
+        .await
+}
+
+/// Removes one extracted item the model got wrong.
+///
+/// Returns the deleted row whole so the undo toast can hand it straight back
+/// to [`conversation_restore_extraction_item`] — the item comes back with its
+/// assignee, due date and quote intact rather than as a bare line of text.
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_delete_extraction_item(
+    state: State<'_, AppState>,
+    kind: ExtractionKind,
+    item_id: String,
+) -> Result<DeletedExtraction, AppError> {
+    state.storage.delete_extraction_item(kind, &item_id).await
+}
+
+/// Undo for [`conversation_delete_extraction_item`].
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_restore_extraction_item(
+    state: State<'_, AppState>,
+    item: DeletedExtraction,
+) -> Result<(), AppError> {
+    state.storage.restore_extraction_item(item).await
+}
+
+/// Rewrites an extracted item's text, which also claims it: the row stops
+/// being model-owned, so regenerating leaves it alone. Returns nothing —
+/// the caller already knows the text it sent, and every list that shows this
+/// row patches its own cache optimistically.
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_set_extraction_text(
+    state: State<'_, AppState>,
+    kind: ExtractionKind,
+    item_id: String,
+    text: String,
+) -> Result<(), AppError> {
+    state
+        .storage
+        .set_extraction_text(kind, &item_id, &text)
         .await
 }
 
@@ -395,10 +466,9 @@ pub async fn get_conversation_detail(
     })
 }
 
-/// Toggles one `<ActionItemRow>` checkbox (LLD-11 §3.2). Thin wrapper over
-/// the storage method W4 already shipped but nothing ever called from a
-/// command — Conversation Detail is the first UI surface that renders
-/// action items at all.
+/// Toggles one `<ActionItemRow>` checkbox. Thin wrapper over
+/// the storage method — Conversation Detail is the first UI surface that
+/// renders action items at all.
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_set_action_item_done(
@@ -412,7 +482,7 @@ pub async fn conversation_set_action_item_done(
         .await
 }
 
-/// Renames a conversation (LLD-11 §3.2 `<EditableTitle>`).
+/// Renames a conversation (`<EditableTitle>`).
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_set_title(
@@ -427,8 +497,9 @@ pub async fn conversation_set_title(
         .await
 }
 
-/// Persists Conversation Detail's Notes tab (debug-session patch — the
-/// recording screen's notes draft used to be local-only, LLD-11 §3.1).
+/// Persists Conversation Detail's Notes tab — the
+/// recording screen's notes draft is saved here rather than staying
+/// local-only.
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_set_notes(
@@ -442,13 +513,11 @@ pub async fn conversation_set_notes(
         .await
 }
 
-/// W17b — Conversation Detail's overflow-menu Delete (12_CORNER_CASES.md
-/// "Data delete flows"). Only `delete_conversation` itself existed before
-/// this (crash-recovery's Discard actions, in `commands::recording`) — a
-/// live user-initiated delete from Conversation Detail had no command of
-/// its own. Thin wrapper: reuses the same atomic, crash-resumable
-/// `enqueue_conversation_delete` path everything else in the app uses, so
-/// there is nothing new to get wrong here.
+/// Conversation Detail's overflow-menu Delete (12_CORNER_CASES.md
+/// "Data delete flows"). Thin wrapper: reuses the same atomic,
+/// crash-resumable `enqueue_conversation_delete` path everything else in
+/// the app uses (crash-recovery's Discard actions, in
+/// `commands::recording`), so there is nothing new to get wrong here.
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_delete(
@@ -458,8 +527,8 @@ pub async fn conversation_delete(
     state.storage.delete_conversation(&conversation_id).await
 }
 
-/// Adds a user-authored action item (debug-session patch — previously the
-/// only way an `action_items` row could exist was via extraction).
+/// Adds a user-authored action item — the other way an `action_items`
+/// row can exist is via extraction.
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_create_action_item(
@@ -474,6 +543,7 @@ pub async fn conversation_create_action_item(
             NewActionItem {
                 text,
                 assignee_hint: None,
+                assignee_is_self: false,
                 due_hint: None,
                 source_ts: None,
             },
@@ -491,7 +561,20 @@ pub async fn conversation_create_action_item(
     result
 }
 
-/// Re-runs one conversation's extraction turn (LLD-05 §4.4's idempotent
+/// What a regeneration actually did, so the UI can say so instead of
+/// guessing.
+///
+/// `summary_written` is `false` when the user had rewritten `summary.md` by
+/// hand and it was therefore left alone — the ordinary, expected outcome of
+/// regenerating a conversation whose summary you have edited, not an error.
+/// Before this the command returned `()`, so the frontend announced "Summary
+/// regenerated" in both cases, one of which was untrue.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct RegenerateOutcome {
+    pub summary_written: bool,
+}
+
+/// Re-runs one conversation's extraction turn (idempotent
 /// re-extraction), then — same as the post-recording pipeline — attempts the
 /// project-memory auto-refresh trigger. `force_overwrite` is sourced from the
 /// UI's "Overwrite your edits?" modal confirmation (`pages/04`); the auto
@@ -504,13 +587,13 @@ pub async fn conversation_retry_step(
     conversation_id: String,
     step: RetryableStep,
     force_overwrite: bool,
-) -> Result<(), AppError> {
+) -> Result<RegenerateOutcome, AppError> {
     let RetryableStep::Extraction = step;
 
     let conversation = state.storage.get_conversation(&conversation_id).await?;
 
-    // "If the pipeline never reached extracting, this errors
-    // AppError::Validation" (LLD-05 §3.1) — no `pipeline_state` row at all
+    // If the pipeline never reached extracting, this errors
+    // AppError::Validation — no `pipeline_state` row at all
     // means `stop_recording` never even reached `finalizing`.
     if state
         .storage
@@ -563,7 +646,7 @@ pub async fn conversation_retry_step(
 
     // Project memory auto-refresh only applies when this conversation
     // belongs to a project — unfiled conversations have no memory doc to
-    // refresh (W15 design decision: recordings never require a project).
+    // refresh (recordings never require a project).
     if let Some(project_id) = conversation.project_id.clone() {
         if let Ok(project) = state.storage.get_project(&project_id).await {
             match crate::memory::maybe_auto_refresh(
@@ -577,21 +660,20 @@ pub async fn conversation_retry_step(
             .await
             {
                 Ok(Some(refresh)) => {
-                    let _ = app.emit(
-                        "project-memory-updated",
-                        serde_json::json!({
-                            "project_id": project_id,
-                            "significant_change": refresh.significant_change,
-                        }),
-                    );
+                    let _ = crate::events::ProjectMemoryUpdated {
+                        project_id,
+                        significant_change: refresh.significant_change,
+                    }
+                    .emit(&app);
                 }
                 Ok(None) => {}
                 Err(err) => {
                     tracing::error!(project_id, error = %err, "conversation.retry_step_auto_refresh_failed");
-                    let _ = app.emit(
-                        "project-memory-refresh-failed",
-                        serde_json::json!({ "project_id": project_id, "error_kind": err.to_string() }),
-                    );
+                    let _ = crate::events::ProjectMemoryRefreshFailed {
+                        project_id,
+                        error_kind: err.to_string(),
+                    }
+                    .emit(&app);
                 }
             }
         }
@@ -619,7 +701,9 @@ pub async fn conversation_retry_step(
             .await?;
     }
 
-    Ok(())
+    Ok(RegenerateOutcome {
+        summary_written: outcome.summary_written,
+    })
 }
 
 #[cfg(test)]

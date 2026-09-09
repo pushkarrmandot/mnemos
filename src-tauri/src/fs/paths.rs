@@ -1,5 +1,5 @@
-//! Resolves everything under `~/Mnemos/`. The only place that knows the layout
-//! (HLD §5.2). W4 extends this with ID-based conversation/project resolution.
+//! Resolves everything under `~/Mnemos/`. The only place that knows the layout,
+//! including ID-based conversation/project resolution.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -9,9 +9,9 @@ use regex_lite::Regex;
 use crate::error::AppError;
 
 /// `~/Mnemos` on macOS/Linux, `%LOCALAPPDATA%\Mnemos` on Windows — the app's
-/// single data root, overridable via `$MNEMOS_HOME` (LLD-08 §4's
-/// `--data-dir` sketch: "defaults to `$MNEMOS_HOME` env var, then
-/// `~/Mnemos/`"). The main app never sets this; `mnemos-mcp-server`'s
+/// single data root, overridable via `$MNEMOS_HOME` (defaults to
+/// `$MNEMOS_HOME` env var, then `~/Mnemos/`). The main app never sets this;
+/// `mnemos-mcp-server`'s
 /// `--data-dir` flag does, by setting the env var once at startup before
 /// any path is resolved — letting both binaries share one path resolver
 /// and letting integration tests point either one at a temp directory
@@ -59,23 +59,23 @@ pub fn backups_dir() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("backups"))
 }
 
-/// `~/Mnemos/state` — worker manifest + job-queue snapshots (LLD-02 §5.3, §6).
+/// `~/Mnemos/state` — worker manifest + job-queue snapshots.
 pub fn state_dir() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("state"))
 }
 
-/// `~/Mnemos/state/worker-manifest.json` (LLD-02 §5.3).
+/// `~/Mnemos/state/worker-manifest.json`
 pub fn worker_manifest_path() -> Result<PathBuf, AppError> {
     Ok(state_dir()?.join("worker-manifest.json"))
 }
 
 /// `~/Mnemos/state/pending_jobs.json` — worker-written, replayed by the
-/// supervisor on restart (LLD-02 §6; reserved but unused by LLD-01/W4).
+/// supervisor on restart (reserved but currently unused).
 pub fn pending_jobs_path() -> Result<PathBuf, AppError> {
     Ok(state_dir()?.join("pending_jobs.json"))
 }
 
-/// `~/Mnemos/state/current_job.json` — the single in-flight job (LLD-02 §6).
+/// `~/Mnemos/state/current_job.json` — the single in-flight job.
 pub fn current_job_path() -> Result<PathBuf, AppError> {
     Ok(state_dir()?.join("current_job.json"))
 }
@@ -87,23 +87,21 @@ pub fn projects_root() -> Result<PathBuf, AppError> {
 
 /// `~/Mnemos/recordings` — every conversation's on-disk home, filed or not,
 /// keyed by conversation id alone. Project assignment lives purely in
-/// `conversations.project_id`; it never affects this path. Through W16 this
-/// was project-scoped (`projects/<id>/conversations/<convId>/`), mirroring
-/// LanceDB's real need for a per-project directory it can atomically
-/// `rm -rf` on project delete (HLD §5.4/v1.3) — but plain audio/transcript
-/// blobs have no such requirement, and nesting them anyway meant every
-/// project reassignment had to rename a live directory on disk, which
-/// silently broke anything that had independently cached the old path (the
-/// mac sidecar's live-transcription mic.wav location was one). Flat and
-/// DB-owned removes that whole class of bug instead of patching each cache
-/// site. LanceDB, when it ships, keeps its own `projects/<id>/lancedb/` —
-/// that isolation need is real and stays project-scoped.
+/// `conversations.project_id`; it never affects this path. Nesting
+/// recordings under a project directory (as LanceDB's per-project
+/// `projects/<id>/lancedb/` does, for its real need to atomically `rm -rf`
+/// on project delete) would mean every project reassignment has to rename a
+/// live directory on disk — plain audio/transcript blobs have no such
+/// requirement, and a rename risks silently breaking anything that
+/// independently cached the old path (e.g. the mac sidecar's
+/// live-transcription mic.wav location). Flat and DB-owned avoids that
+/// whole class of bug instead of patching each cache site.
 pub fn recordings_root() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("recordings"))
 }
 
 /// `~/Mnemos/runtime/mcp` — per-chat-session `mcp.json` files a `ClaudeRunner`
-/// writes on `start()` and deletes on `dispose()` (LLD-07 §6.1, W13a).
+/// writes on `start()` and deletes on `dispose()`.
 pub fn mcp_config_dir() -> Result<PathBuf, AppError> {
     Ok(data_root()?.join("runtime").join("mcp"))
 }
@@ -117,7 +115,7 @@ pub fn mcp_config_path(session_id: &str) -> Result<PathBuf, AppError> {
 
 /// Rejects anything that is not a canonical UUID (36 chars, hex + dashes) —
 /// no `..`, no absolute paths, no separators. Every ID-based path accessor
-/// below runs its inputs through this first (LLD-01 §14.1): construction of
+/// below runs its inputs through this first: construction of
 /// a path is validation, so nothing downstream needs to re-check.
 pub fn validate_uuid(s: &str) -> Result<(), AppError> {
     static UUID_RE: OnceLock<Regex> = OnceLock::new();
@@ -155,6 +153,31 @@ pub fn project_memory_history_path(project_id: &str, iso_ts: &str) -> Result<Pat
     Ok(project_memory_history_dir(project_id)?.join(format!("{iso_ts}.json")))
 }
 
+/// `~/Mnemos/agent` — the working directory every `claude` CLI subprocess
+/// is spawned into.
+///
+/// This exists for one reason: a GUI app launched from Finder inherits
+/// `launchd`'s working directory, which is `/`. The CLI derives its project
+/// root from its cwd, so an unpinned spawn made the *entire filesystem* the
+/// project — and the CLI's startup scan of that root walks straight into
+/// `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive and
+/// `~/Library`, tripping a separate macOS TCC consent prompt for each one.
+/// A user retrying a single recording got five system permission dialogs
+/// that had nothing to do with anything they had asked for.
+///
+/// Pinning the spawn to a directory the app owns and keeps empty makes that
+/// scan find nothing and cross no privacy boundary. It is deliberately
+/// *not* under `~/Documents` or any other TCC-gated location, and
+/// deliberately not the recordings tree either — the CLI writes its own
+/// session state keyed by cwd, and that should not land among user data.
+pub fn agent_cwd() -> Result<PathBuf, AppError> {
+    let dir = data_root()?.join("agent");
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        AppError::internal(format!("could not create agent working directory: {e}"))
+    })?;
+    Ok(dir)
+}
+
 /// `~/Mnemos/recordings/<conversationId>/` — see `recordings_root` for why
 /// this no longer takes a `project_id`.
 pub fn conversation_dir(conversation_id: &str) -> Result<PathBuf, AppError> {
@@ -167,8 +190,8 @@ pub fn transcript_json_path(conversation_id: &str) -> Result<PathBuf, AppError> 
     Ok(conversation_dir(conversation_id)?.join("transcript.json"))
 }
 
-/// `.../recordings/<conversationId>/transcript.jsonl` — append-only live buffer,
-/// per LLD-01 §6.2. Retained until the pipeline reaches `done`, then deleted.
+/// `.../recordings/<conversationId>/transcript.jsonl` — append-only live
+/// buffer. Retained until the pipeline reaches `done`, then deleted.
 pub fn transcript_jsonl_path(conversation_id: &str) -> Result<PathBuf, AppError> {
     Ok(conversation_dir(conversation_id)?.join("transcript.jsonl"))
 }
@@ -183,7 +206,7 @@ pub fn summary_md_path(conversation_id: &str) -> Result<PathBuf, AppError> {
     Ok(conversation_dir(conversation_id)?.join("summary.md"))
 }
 
-/// `.../recordings/<conversationId>/mic.wav` (LLD-03 §4 — 16kHz mono
+/// `.../recordings/<conversationId>/mic.wav` (16kHz mono
 /// 16-bit PCM, written by the mac sidecar or the Windows capture thread).
 pub fn mic_wav_path(conversation_id: &str) -> Result<PathBuf, AppError> {
     Ok(conversation_dir(conversation_id)?.join("mic.wav"))

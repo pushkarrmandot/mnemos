@@ -1,4 +1,4 @@
-//! `pending_deletes` state machine (LLD-01 §7), trimmed to v1's two delete
+//! `pending_deletes` state machine, trimmed to v1's two delete
 //! flows (project, conversation) and three phases (`marked` -> `sqlite_done`
 //! -> `fs_done`) — no `lancedb_done` phase because v1 has no LanceDB store to
 //! delete from (v1.2), no `contact` kind because contacts are v1.3.
@@ -21,13 +21,7 @@ pub struct PendingDeleteRow {
     pub id: i64,
     pub kind: String,
     pub target_id: String,
-    #[allow(dead_code)]
-    pub enqueued_at: i64,
     pub phase: String,
-    #[allow(dead_code)]
-    pub error: Option<String>,
-    #[allow(dead_code)]
-    pub last_attempt: Option<i64>,
     pub attempts: i64,
 }
 
@@ -89,14 +83,14 @@ pub async fn enqueue_project_delete(pool: &SqlitePool, project_id: &str) -> Resu
     .await
 }
 
-/// Phase 0 (mark) for a conversation delete. No longer takes a `project_id`
+/// Phase 0 (mark) for a conversation delete. Does not take a `project_id`
 /// — `conversation_dir` is flat and keyed by id alone (`fs::paths`), so
-/// there is nothing project-scoped left to remember here. Dropping it also
-/// removes a real TOCTOU: the row used to snapshot `project_id` at
-/// `delete_conversation`'s read, outside of this transaction, so a
-/// concurrent `conversation_set_project` racing in between could commit a
-/// stale value and leave `run_fs_phase` looking in the wrong (renamed-away)
-/// directory at resume time — silently orphaning it.
+/// there is nothing project-scoped left to remember here. This also avoids
+/// a real TOCTOU: snapshotting `project_id` at `delete_conversation`'s read,
+/// outside of this transaction, would let a concurrent
+/// `conversation_set_project` racing in between commit a stale value and
+/// leave `run_fs_phase` looking in the wrong (renamed-away) directory at
+/// resume time — silently orphaning it.
 pub async fn enqueue_conversation_delete(
     pool: &SqlitePool,
     conversation_id: &str,
@@ -136,7 +130,7 @@ pub async fn enqueue_conversation_delete(
 }
 
 /// Drives every `pending_deletes` row forward one or more phases. Called on
-/// boot (crash-resume, LLD-01 §7.5) and safe to call again any time — every
+/// boot (crash-resume) and safe to call again any time — every
 /// phase is idempotent.
 pub async fn resume_pending_deletes(pools: &DbPools) -> Result<(), AppError> {
     let rows: Vec<PendingDeleteRow> = sqlx::query_as(

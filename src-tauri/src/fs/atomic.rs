@@ -1,6 +1,6 @@
-//! Atomic file writes: temp-file + fsync + rename + parent-dir-fsync
-//! (LLD-01 §6.2). The only path any Rust caller uses to write a user
-//! artifact — no `File::create` + `write_all` scattered elsewhere.
+//! Atomic file writes: temp-file + fsync + rename + parent-dir-fsync.
+//! The only path any Rust caller uses to write a user artifact — no
+//! `File::create` + `write_all` scattered elsewhere.
 
 use std::fs;
 use std::io::Write;

@@ -1,6 +1,6 @@
 //! The single error type crossing the Rust → React boundary.
 //!
-//! Flat variants only (HLD §10.1, BACKEND §1): `tauri-specta` turns this into a
+//! Flat variants only: `tauri-specta` turns this into a
 //! TypeScript discriminated union keyed on `kind`, so the frontend gets one
 //! exhaustive `switch` over every error class. Nesting a sub-kind would cost us
 //! that exhaustiveness check.
@@ -73,8 +73,19 @@ pub enum AppError {
         correlation_id: String,
     },
 
-    #[error("operation cancelled")]
-    Cancelled,
+    /// The worker's own vocabulary calls this "cancelled" (`CANCELLED` in
+    /// `errors.py`, JSON-RPC code `-32020`), but its one producer today
+    /// (`agent_call.py`'s `_agent_call`) only ever raises it for a reverse-RPC
+    /// timeout, never a real user-initiated cancel — nothing in this app
+    /// exposes a cancel button that could produce this. `message` carries the
+    /// worker's actual reason (e.g. "agent timeout: ...") through rather than
+    /// discarding it: this used to be a fieldless variant with a fixed
+    /// `"operation cancelled"` Display string, which is what a user saw
+    /// (stored verbatim as `pipeline_error`, or surfaced via `describeError`)
+    /// with zero indication of what actually happened or why retrying might
+    /// work.
+    #[error("timed out: {message}")]
+    Cancelled { message: String },
 
     #[error("internal error: {message}")]
     Internal {
@@ -116,7 +127,7 @@ impl AppError {
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         // I/O at this layer is filesystem access under ~/Mnemos; storage is the
-        // honest classification. Message only — never the path (BACKEND §7).
+        // honest classification. Message only — never the path.
         Self::storage(err.kind().to_string())
     }
 }
