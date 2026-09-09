@@ -7,7 +7,7 @@ import { commands } from "@/ipc/client";
 import { qk, staleTimes } from "@/queries/keys";
 
 /**
- * Home's "Project pulse" (`02_DASHBOARD_AND_NAV.md`). Server does the
+ * Home's "Project pulse". Server does the
  * gating (>=5 conversations) and the counting (7-day window off
  * `created_at`) in one round trip — see `dashboard_get_project_pulse`.
  *

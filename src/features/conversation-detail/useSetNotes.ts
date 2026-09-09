@@ -4,7 +4,7 @@ import { commands } from "@/ipc";
 import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
 
-/** Notes tab (LLD-11 §3.1/§3.2). Optimistic, same shape as `useSetTitle`. */
+/** The Notes tab in Conversation Detail. Optimistic, same shape as `useSetTitle`. */
 export function useSetNotes(conversationId: string) {
   return useMutation({
     mutationFn: (notes: string) => commands.conversation.setNotes(conversationId, notes),

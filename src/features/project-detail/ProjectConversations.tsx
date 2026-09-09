@@ -5,7 +5,7 @@ import { ConversationRow } from "@/features/shared/ConversationRow";
 import { conversationFilter } from "@/queries/conversationFilter";
 import { usePagedConversations } from "@/queries/paged";
 
-/** Reactive — straight SQL, no agent call (05_PROJECT_MEMORY.md §"Two kinds of content"). */
+/** Reactive — straight SQL, no agent call. */
 const PAGE_SIZE = 20;
 
 export function ProjectConversations({ projectId }: { projectId: string }) {

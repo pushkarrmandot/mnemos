@@ -4,7 +4,7 @@ import { commands } from "@/ipc";
 import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
 
-/** `<EditableTitle>` (LLD-11 §3.2). Optimistic, same shape as `useSetActionItemDone`. */
+/** The editable conversation title in Conversation Detail (`<EditableTitle>`). Optimistic, same shape as `useSetActionItemDone`. */
 export function useSetTitle(conversationId: string) {
   return useMutation({
     mutationFn: (title: string) => commands.conversation.setTitle(conversationId, title),

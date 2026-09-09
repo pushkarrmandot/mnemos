@@ -12,7 +12,7 @@ export function CopyButton({
 }: {
   text: string;
   label: string;
-  /** W17b — lets per-row callers (`ExtractionLists`) add hover-reveal
+  /** Lets per-row callers (`ExtractionLists`) add hover-reveal
    * classes without this component needing to know about that pattern. */
   className?: string;
 }) {

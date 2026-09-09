@@ -39,8 +39,8 @@ function PendingNotice({ pending, threshold }: { pending: number; threshold: num
 }
 
 /**
- * Renders `project_memory.json` (LLD-05 §5.3), read-only this wave — the
- * inline-editable prose blocks 05_PROJECT_MEMORY.md's "Editing behavior"
+ * Renders `project_memory.json`, read-only for now — the
+ * inline-editable prose blocks the "Editing behavior" spec
  * describes are a later pass. Reactive sections (Decisions/Open Questions/
  * Recent Conversations) aren't rendered here either — this pane is just the
  * two LLM-synthesized fields (Overview, Scope Drift).
@@ -73,13 +73,13 @@ export function ProjectMemoryPane({ projectId }: { projectId: string }) {
 
   return (
     <>
-      {/* W17c: Overview and Scope drift are two of 05_PROJECT_MEMORY.md's five
+      {/* Overview and Scope drift are two of the project memory spec's five
           top-level sections, so they get the same `<Section>` treatment every
-          section on Conversation Detail gets — icon + `type-h3` + divider.
-          They were previously nested inside a single "Project memory" section
-          under `type-caption uppercase` sub-headings, which made two headline
-          sections read as minor labels and broke the visual rhythm the rest of
-          the app follows. */}
+          section on Conversation Detail gets — icon + `type-h3` + divider,
+          rather than being nested under `type-caption uppercase`
+          sub-headings inside a single "Project memory" section, which would
+          make two headline sections read as minor labels and break the
+          visual rhythm the rest of the app follows. */}
       <Section
         action={
           overview_markdown ? (

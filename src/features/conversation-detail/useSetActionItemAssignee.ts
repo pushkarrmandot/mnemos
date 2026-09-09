@@ -16,8 +16,12 @@ import { qk } from "@/queries/keys";
  */
 export function useSetActionItemAssignee(conversationId: string) {
   return useMutation({
-    mutationFn: (vars: { actionItemId: string; assigneeHint: string | null }) =>
-      commands.conversation.setActionItemAssignee(vars.actionItemId, vars.assigneeHint),
+    mutationFn: (vars: { actionItemId: string; assigneeHint: string | null; isSelf: boolean }) =>
+      commands.conversation.setActionItemAssignee(
+        vars.actionItemId,
+        vars.assigneeHint,
+        vars.isSelf,
+      ),
     onMutate: async (vars) => {
       const key = qk.conversation(conversationId);
       await queryClient.cancelQueries({ queryKey: key });
@@ -27,7 +31,12 @@ export function useSetActionItemAssignee(conversationId: string) {
           ...previous,
           action_items: previous.action_items.map((item) =>
             item.id === vars.actionItemId
-              ? { ...item, assignee_hint: vars.assigneeHint, assignee_source: "manual" }
+              ? {
+                  ...item,
+                  assignee_hint: vars.assigneeHint,
+                  assignee_is_self: vars.isSelf,
+                  assignee_source: "manual",
+                }
               : item,
           ),
         });

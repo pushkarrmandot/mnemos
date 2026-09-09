@@ -56,10 +56,11 @@ describe("deriveDisplayState", () => {
   });
 
   /**
-   * Regression: Detail is navigated to optimistically on Stop, so its fetch
-   * often resolves before `stop_recording` commits `status = processing`.
-   * A stale `"recording"` used to win outright, leaving the page showing a
-   * "Generate Summary" button while the summary was already being produced.
+   * Regression guard: Detail is navigated to optimistically on Stop, so its
+   * fetch often resolves before `stop_recording` commits `status =
+   * processing`. Live progress must override a stale `"recording"`, or the
+   * page would show a "Generate Summary" button while the summary is
+   * already being produced.
    */
   it("lets live progress override a stale recording status", () => {
     expect(
@@ -78,5 +79,30 @@ describe("deriveDisplayState", () => {
     expect(deriveDisplayState("recording", "done", { step: "done", status: "done" })).toEqual({
       kind: "done",
     });
+  });
+
+  /**
+   * `qk.conversationPipeline` (the `live` argument) is fed only by
+   * `processing-progress` events and has no expiry. `conversation_retry_step`
+   * (Regenerate/Retry) writes a fresh terminal `pipeline_step` to the DB
+   * without emitting any of those events, so a `{status: "failed"}` entry
+   * left behind by an earlier, genuinely-failed run can outlive that run —
+   * and did: a successful Retry moved `pipeline_step` to `"done"` while this
+   * stale entry kept the failure banner showing. `pipelineStep` has to win
+   * once it's terminal, or a fixed conversation can be stuck looking broken
+   * forever with no event left to correct it.
+   */
+  it("trusts a terminal DB pipeline step over a stale failed entry left in the live cache", () => {
+    expect(deriveDisplayState("ready", "done", { step: "extracting", status: "failed" })).toEqual({
+      kind: "done",
+    });
+  });
+
+  it("trusts a terminal DB pipeline step over a stale live entry the other way too", () => {
+    // Less likely in practice (nothing currently re-fails a DB row after it
+    // reached "done"), but the rule is symmetric and should stay that way.
+    expect(
+      deriveDisplayState("failed", "failed", { step: "extracting", status: "running" }),
+    ).toEqual({ kind: "failed", step: "extracting" });
   });
 });

@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-/** `<Section*>` wrapper (LLD-11 §3.2's `<SectionStack>` children). */
+/** `<Section*>` wrapper (`<SectionStack>` children). */
 export function Section({
   title,
   icon: Icon,

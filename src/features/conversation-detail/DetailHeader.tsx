@@ -1,14 +1,9 @@
 import { Clock } from "lucide-react";
 import { ProjectChip } from "@/features/shared/ProjectChip";
 import type { Conversation } from "@/ipc";
+import { formatMmSs } from "@/lib/time";
 import { ConversationOverflowMenu } from "./ConversationOverflowMenu";
 import { EditableTitle } from "./EditableTitle";
-
-function formatDuration(totalSeconds: number): string {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.floor(totalSeconds % 60);
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
 
 function formatDate(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
@@ -26,13 +21,14 @@ function formatTime(unixSeconds: number): string {
 }
 
 /**
- * `<DetailHeader>` (LLD-11 §3.2): editable title + meta row. Regenerate
+ * `<DetailHeader>`: editable title + meta row. Regenerate
  * lives on the Summary section itself (only meaningful once a summary
  * exists to regenerate — see `_app.conversation.$conversationId.tsx`), not
  * here. `<StarButton>`/`<MoveMenu>` are still out of scope — no star/move
- * state exists yet. `<ConversationOverflowMenu>` (W17b) is the first piece
- * of the formerly-all-deferred `<OverflowMenu>` to land — Copy-as-Markdown
- * and Delete, the two pieces that now have real backend support.
+ * state exists yet. `<ConversationOverflowMenu>` is the first piece
+ * of `<OverflowMenu>` to land — Copy-as-Markdown
+ * and Delete, the two pieces that now have real backend support; the rest
+ * of the menu stays deferred until it does too.
  */
 export function DetailHeader({
   conversation,
@@ -62,7 +58,7 @@ export function DetailHeader({
           <span className="flex items-center gap-1.5">
             <Clock aria-hidden="true" className="size-4" />
             {conversation.duration_s != null
-              ? formatDuration(conversation.duration_s)
+              ? formatMmSs(conversation.duration_s * 1000)
               : "In progress"}
           </span>
         </div>

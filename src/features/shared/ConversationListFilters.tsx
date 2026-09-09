@@ -36,7 +36,7 @@ function scopeLabel(scope: ListScope, projectName: (id: string) => string | unde
 }
 
 /**
- * The filter bar above a conversation archive (W18).
+ * The filter bar above a conversation archive.
  *
  * Filters, not page numbers, are the primary way through a personal meeting
  * archive: you can nearly always describe what you are after, and a described

@@ -3,9 +3,9 @@ import { READING_MAX_W } from "./layout";
 
 /**
  * Minimal read-only markdown renderer for `summary.md`. No dependency added
- * for this — the shipping extraction prompt (LLD-05 §6.1) only ever produces
+ * for this — the shipping extraction prompt only ever produces
  * headings, bold/italic emphasis, and bullet/numbered lists, and summary
- * editing (tiptap, LLD-11 §10.2) isn't built this wave, so there is no
+ * editing (tiptap) isn't built yet, so there is no
  * arbitrary user-authored markdown to round-trip yet. Revisit with a real
  * parser if/when editing lands.
  */
@@ -56,13 +56,13 @@ export function MarkdownView({ markdown, className }: { markdown: string; classN
       const level = (heading[1] ?? "#").length;
       const text = heading[2] ?? "";
       const Tag = level === 1 ? "h3" : level === 2 ? "h4" : "h5";
-      // `type-h4`/`type-h5` don't exist (the named scale stops at
-      // `type-h3`, DESIGN_SYSTEM.md §3) — this used to reference a class
-      // that was never defined, so every `##`/`###` heading (what most real
+      // `type-h4`/`type-h5` don't exist — the named scale stops at
+      // `type-h3` — so `##`/`###` headings (what most real
       // extraction output actually uses — `## Discussion`/`## Decisions`/
-      // etc., LLD-05's prompt) rendered with zero styling at all: no size,
-      // no weight, indistinguishable from a paragraph. `#` stays `type-h3`
-      // (unchanged, already correct) — the Section chrome above this content
+      // etc.) map to weight variants of `type-body` instead of a
+      // nonexistent class, which would otherwise render with zero styling
+      // at all: no size, no weight, indistinguishable from a paragraph.
+      // `#` stays `type-h3` — the Section chrome above this content
       // ("Summary", with its icon) is itself `type-h3`, so a bigger in-body
       // heading here would visually outrank its own section title. `##`/`###`
       // differentiate by *weight*, not size, so they stay clearly

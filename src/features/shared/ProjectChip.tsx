@@ -20,7 +20,7 @@ const TRIGGER_CLASS = cn(
 );
 
 /**
- * Real project assignment chip (W19: editable/read-only split — see below).
+ * Real project assignment chip (editable/read-only split — see below).
  * The backend command (`conversation.conversation_set_project`) handles
  * every caller the same way: a plain DB update (conversation directories are
  * flat and keyed by id alone, so there's no file to move), plus, if this

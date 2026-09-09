@@ -1,95 +1,23 @@
 import { Link } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
 import { useState } from "react";
 import { RevealMore } from "@/components/app/RevealMore";
 import { SegmentedTabs } from "@/components/app/SegmentedTabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AssigneePicker, assigneeSuggestions } from "@/features/conversation-detail/AssigneePicker";
-import { personHint } from "@/features/conversation-detail/ExtractionLists";
+import {
+  AddItemRow,
+  EXTRACTION_ROW_CLASS,
+  HintBadge,
+  personHint,
+} from "@/features/shared/extractionRow";
 import type { ActionItemWithSource } from "@/ipc";
 import type { PagedResult } from "@/queries/paged";
-
-/** Shared with `ExtractionLists.tsx` — same row shape everywhere action
- * items render, deliberately, so a row here and a row in Conversation Detail
- * stay pixel-identical. */
-const ROW_CLASS =
-  "group flex min-h-11 items-start gap-3 rounded-md px-2 py-3 motion-quick hover:bg-hover";
-
-function HintBadge({ children }: { children: string }) {
-  return (
-    <span className="type-caption inline-flex items-center rounded-full bg-subtle px-2 py-0.5 text-tertiary">
-      {children}
-    </span>
-  );
-}
-
-/** Inline "+ Add" row, generic over what "commit" does — the conversation-
- * scoped version in `ExtractionLists.tsx` has its own copy because its
- * mutation hook is conversation-specific; this one is deliberately decoupled
- * from any particular mutation so both Home and the Project page can pass
- * their own `onCreate`. */
-function AddRow({
-  onCreate,
-  placeholder,
-}: {
-  onCreate: (text: string) => void;
-  placeholder: string;
-}) {
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed) onCreate(trimmed);
-    setDraft("");
-    setAdding(false);
-  };
-
-  if (adding) {
-    return (
-      <li className={ROW_CLASS}>
-        <Plus aria-hidden="true" className="mt-1 size-4 shrink-0 text-tertiary" />
-        <input
-          autoFocus
-          className="type-body min-w-0 flex-1 bg-transparent text-primary outline-none placeholder:text-tertiary"
-          onBlur={commit}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setDraft("");
-              setAdding(false);
-            }
-          }}
-          placeholder={placeholder}
-          value={draft}
-        />
-      </li>
-    );
-  }
-
-  return (
-    <li>
-      <button
-        className={`${ROW_CLASS} w-full text-left text-secondary hover:text-primary`}
-        onClick={() => setAdding(true)}
-        type="button"
-      >
-        <Plus aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        <span className="type-body">Add action item</span>
-      </button>
-    </li>
-  );
-}
 
 /**
  * Paged, Open/Done-tabbed action items list — spans conversations (unlike
  * `ExtractionLists.tsx`'s `ActionItemsSection`, which is one conversation's
  * own bounded, unpaged list). Used by both the Project page's Action Items
- * section and Home's "Your to-dos" (W19); the only thing that differs
+ * section and Home's "Your to-dos"; the only thing that differs
  * between them is which paged query and which project scope (or none) feeds
  * it, so this component takes the paged results and the mutation callbacks,
  * not a project id.
@@ -112,7 +40,7 @@ export function GlobalActionItemsList({
   done: PagedResult<ActionItemWithSource>;
   onCreate: (text: string) => void;
   onDoneChange: (itemId: string, done: boolean) => void;
-  onAssigneeChange: (itemId: string, assigneeHint: string | null) => void;
+  onAssigneeChange: (itemId: string, assigneeHint: string | null, isSelf: boolean) => void;
   pageSize: number;
 }) {
   const [tab, setTab] = useState<"open" | "done">("open");
@@ -146,7 +74,7 @@ export function GlobalActionItemsList({
             </p>
           ) : (
             active.items.map((item) => (
-              <li className={ROW_CLASS} key={item.id}>
+              <li className={EXTRACTION_ROW_CLASS} key={item.id}>
                 <Checkbox
                   checked={item.done}
                   className="mt-0.5 size-4"
@@ -155,7 +83,8 @@ export function GlobalActionItemsList({
                 <div className="min-w-0 flex-1">
                   <div className="mb-1 flex flex-wrap items-center gap-1.5">
                     <AssigneePicker
-                      onChange={(next) => onAssigneeChange(item.id, next)}
+                      isSelf={item.assignee_is_self}
+                      onChange={(next) => onAssigneeChange(item.id, next.hint, next.isSelf)}
                       suggestions={suggestions}
                       value={personHint(item.assignee_hint)}
                     />
@@ -180,7 +109,7 @@ export function GlobalActionItemsList({
               </li>
             ))
           )}
-          {tab === "open" ? <AddRow onCreate={onCreate} placeholder={addPlaceholder} /> : null}
+          {tab === "open" ? <AddItemRow onCreate={onCreate} placeholder={addPlaceholder} /> : null}
         </ul>
       )}
 

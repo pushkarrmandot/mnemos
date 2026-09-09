@@ -6,16 +6,26 @@ import { qk } from "@/queries/keys";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<RegenerateSummaryButton>` (LLD-11 §9). `conversation.retry_step`
+ * The Regenerate Summary button in Conversation Detail. `conversation.retry_step`
  * resolves only once the whole re-extraction (+ best-effort auto-refresh)
  * has run — unlike the post-recording pipeline it doesn't emit
  * `processing-progress`/`conversation-ready`, so this mutation invalidates
  * `qk.conversation(id)` itself in `onSuccess` rather than waiting on an event.
  *
- * v1 scope: always `force_overwrite: false`. The §9 "Overwrite your edits?"
- * modal exists to protect a manually-edited `summary.md`, but summary editing
- * (§10, tiptap) isn't built this wave — there is no UI path that could have
- * edited it, so the modal would never have anything to protect against.
+ * Regenerate never touches `useConversationPipelineStore` (Retry doesn't run
+ * through the post-recording pipeline, so it never emits `processing-progress`
+ * events either) — nothing here needs to clear it. A stale entry left over
+ * from an earlier run can no longer cause the bug it once did:
+ * `deriveDisplayState` treats a terminal DB `pipeline_step` as authoritative
+ * outright, so the live store only ever affects the step *name* shown while
+ * `pipeline_step` is itself non-terminal. See that store's doc comment.
+ *
+ * Always `force_overwrite: false`, and there is deliberately no dialog asking
+ * whether to overwrite. A summary the user rewrote is already left alone by
+ * default (`memory::summary_is_user_edited`), so there is nothing to consent
+ * to — the outcome is reported afterwards instead of negotiated beforehand.
+ * `force_overwrite` stays plumbed for the "Reset to the AI summary" escape
+ * hatch, which nothing offers yet; see the Rust command.
  */
 export function useRegenerateSummary(conversationId: string) {
   const pushToast = useUIStore((s) => s.pushToast);
@@ -26,9 +36,16 @@ export function useRegenerateSummary(conversationId: string) {
 
   const mutation = useMutation({
     mutationFn: () => commands.conversation.retryExtraction(conversationId, false),
-    onSuccess: () => {
+    onSuccess: (outcome) => {
       void queryClient.invalidateQueries({ queryKey: qk.conversation(conversationId) });
-      pushToast({ kind: "success", title: "Summary regenerated.", ttlMs: 4000 });
+      pushToast({
+        kind: "success",
+        // Claiming "Summary regenerated" when the summary was deliberately
+        // skipped is how the user learns not to trust the toast.
+        title: outcome.summary_written ? "Summary regenerated." : "Items updated.",
+        ...(outcome.summary_written ? {} : { body: "Your summary was left as you wrote it." }),
+        ttlMs: 4000,
+      });
     },
     onError: (error) => {
       pushToast({

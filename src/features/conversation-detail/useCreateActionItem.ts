@@ -5,7 +5,8 @@ import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
 
 /**
- * The "+ Add action item" row (LLD-11 §3.2). Not optimistic like
+ * The manual "+ Add action item" row, for user-typed items (not
+ * model-extracted). Not optimistic like
  * `useSetActionItemDone` — this creates a new row with a server-assigned
  * id, so it waits for the real `ActionItem` back and appends that instead
  * of guessing an id that would need reconciling.

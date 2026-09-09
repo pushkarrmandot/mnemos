@@ -72,7 +72,7 @@ export function ConversationRow({
   conversation: Conversation;
   projectName?: string | null;
 }) {
-  // Gap #1 (LLD-11 §6's tray-navigation rule, applied here too): a row for
+  // Per the tray-navigation rule, applied here too: a row for
   // the conversation the app is *currently* recording must open the live
   // `/recording` screen, not the post-processing Detail route — Detail has
   // no case for "still actively recording" (`deriveDisplayState` handles the

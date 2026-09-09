@@ -20,8 +20,8 @@ import { qk } from "@/queries/keys";
  */
 export function useSetOpenQuestionOwner(conversationId: string) {
   return useMutation({
-    mutationFn: (vars: { questionId: string; ownerHint: string | null }) =>
-      commands.conversation.setOpenQuestionOwner(vars.questionId, vars.ownerHint),
+    mutationFn: (vars: { questionId: string; ownerHint: string | null; isSelf: boolean }) =>
+      commands.conversation.setOpenQuestionOwner(vars.questionId, vars.ownerHint, vars.isSelf),
     onMutate: async (vars) => {
       const key = qk.conversation(conversationId);
       await queryClient.cancelQueries({ queryKey: key });
@@ -31,7 +31,12 @@ export function useSetOpenQuestionOwner(conversationId: string) {
           ...previous,
           open_questions: previous.open_questions.map((q) =>
             q.id === vars.questionId
-              ? { ...q, owner_hint: vars.ownerHint, owner_source: "manual" }
+              ? {
+                  ...q,
+                  owner_hint: vars.ownerHint,
+                  owner_is_self: vars.isSelf,
+                  owner_source: "manual",
+                }
               : q,
           ),
         });

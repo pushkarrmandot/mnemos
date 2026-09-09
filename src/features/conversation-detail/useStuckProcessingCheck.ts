@@ -5,7 +5,7 @@ import { qk, staleTimes } from "@/queries/keys";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * 12_CORNER_CASES.md "App crashes & recovery" §Mid-processing crash — the
+ * "App crashes & recovery", mid-processing crash case — the
  * "This conversation was still processing when Mnemos closed. Continue?"
  * prompt. Mirrors `useCrashRecoveryCheck` exactly (same single-slot-modal
  * reasoning, same "orphaned by a previous run" trust argument — the

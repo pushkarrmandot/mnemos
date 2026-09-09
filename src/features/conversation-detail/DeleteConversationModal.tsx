@@ -10,7 +10,7 @@ type DeleteConversationModalProps = { conversationId: string; title: string };
 
 /**
  * `<DeleteConversationModal>` — Conversation Detail's overflow-menu Delete.
- * 12_CORNER_CASES.md "Data delete flows": a single conversation is a plain
+ * Per the "Data delete flows" rule: a single conversation is a plain
  * confirm (only projects and all-data get the type-to-confirm step), and
  * "Deleted data is NOT recoverable — no trash, no undo" — the copy says so
  * plainly rather than implying a safety net that doesn't exist.

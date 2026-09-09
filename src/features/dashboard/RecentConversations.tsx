@@ -13,8 +13,8 @@ const RECENT_PAGE_SIZE = 10;
 
 /**
  * Dashboard's permanent home for every conversation, project or not
- * (02_DASHBOARD_AND_NAV.md "RECENT CONVERSATIONS" — always shown once the
- * user has any; W15 design decision: unfiled conversations live here
+ * ("RECENT CONVERSATIONS" — always shown once the
+ * user has any; unfiled conversations live here
  * permanently, not as a stopgap). `null` project filter returns everything.
  */
 export function RecentConversations() {

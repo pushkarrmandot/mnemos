@@ -53,7 +53,7 @@ export function ConversationOverflowMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button aria-label="More actions" size="icon" variant="secondary">
+        <Button aria-label="More actions" size="icon" variant="ghost">
           <MoreHorizontal aria-hidden="true" className="size-4" />
         </Button>
       </DropdownMenuTrigger>

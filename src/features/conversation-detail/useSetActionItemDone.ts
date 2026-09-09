@@ -5,7 +5,7 @@ import { queryClient } from "@/queries/client";
 import { qk } from "@/queries/keys";
 
 /**
- * `<ActionItemRow>` checkbox (LLD-11 §3.2). Optimistic: patches the cached
+ * The action-item checkbox row in Conversation Detail. Optimistic: patches the cached
  * `ConversationDetail.action_items` row in place so the checkbox doesn't
  * flicker back before the round trip completes; rolls back on error.
  */

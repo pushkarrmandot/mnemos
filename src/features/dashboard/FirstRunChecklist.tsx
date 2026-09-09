@@ -8,11 +8,11 @@ import { t } from "@/lib/i18n";
 import { qk } from "@/queries/keys";
 
 /**
- * `01_ONBOARDING.md`'s "Landing" section — replaces the normal Dashboard
+ * The onboarding "Landing" section — replaces the normal Dashboard
  * sections until both rows are satisfied (or dismissed), then never shows
  * again. "Record" derives from whether any conversation exists (no separate
  * flag to drift from reality); "Connect calendar" has no real completion
- * signal in v1 (calendar integration itself is v1.4/W17) — clicking
+ * signal in v1 (calendar integration itself isn't built yet) — clicking
  * "Connect" navigates to the `/integrations` stub and is treated as enough,
  * same reasoning `OnboardingStatus.calendar_checklist_dismissed`'s doc
  * comment documents on the Rust side.

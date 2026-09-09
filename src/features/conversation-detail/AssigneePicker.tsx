@@ -34,11 +34,16 @@ import { qk } from "@/queries/keys";
  *      not an empty submit.
  */
 export function AssigneePicker({
+  isSelf,
   onChange,
   suggestions,
   value,
 }: {
-  onChange: (next: string | null) => void;
+  /** Whether `value` is the app's own user rather than a real name — a
+   * dedicated flag, not encoded into `value` itself (which always holds a
+   * real name or null). See `db::models::ActionItemFilter::assigned_to_me`. */
+  isSelf: boolean;
+  onChange: (next: { hint: string | null; isSelf: boolean }) => void;
   /** Names the model attributed elsewhere in this conversation. */
   suggestions: string[];
   value: string | null;
@@ -52,16 +57,12 @@ export function AssigneePicker({
   });
   const selfName = onboarding.data?.user_first_name?.trim() || null;
 
-  const commit = (next: string | null) => {
-    onChange(next);
+  const commit = (hint: string | null, nextIsSelf: boolean) => {
+    onChange({ hint, isSelf: nextIsSelf });
     setDraft("");
     setOpen(false);
   };
 
-  // "You" is stored literally, not as the user's name: it is what the model
-  // emits for the mic channel, so keeping one representation means the two
-  // paths cannot disagree about who the user is.
-  const isSelf = value?.toLowerCase() === "you";
   const label = value ?? "Assign";
 
   return (
@@ -87,7 +88,7 @@ export function AssigneePicker({
           onSubmit={(e) => {
             e.preventDefault();
             const trimmed = draft.trim();
-            if (trimmed) commit(trimmed);
+            if (trimmed) commit(trimmed, false);
           }}
         >
           <input
@@ -103,7 +104,12 @@ export function AssigneePicker({
           />
         </form>
 
-        <DropdownMenuItem onSelect={() => commit("You")}>
+        <DropdownMenuItem
+          // Onboarding blank is the one case with no real name to write —
+          // falls back to a literal "You" display value; `isSelf: true` is
+          // still the field everything actually queries against.
+          onSelect={() => commit(selfName ?? "You", true)}
+        >
           <UserRound aria-hidden="true" className="size-3.5 shrink-0" />
           <span className="flex-1">
             {selfName ? `${selfName} ` : ""}
@@ -117,11 +123,11 @@ export function AssigneePicker({
             <DropdownMenuSeparator />
             <p className="type-micro px-2 py-1 text-tertiary">Heard in this meeting</p>
             {suggestions.map((name) => (
-              <DropdownMenuItem key={name} onSelect={() => commit(name)}>
+              <DropdownMenuItem key={name} onSelect={() => commit(name, false)}>
                 <span className="flex-1">{name}</span>
                 <Check
                   aria-hidden="true"
-                  className={cn("size-3.5", value !== name && "opacity-0")}
+                  className={cn("size-3.5", (isSelf || value !== name) && "opacity-0")}
                 />
               </DropdownMenuItem>
             ))}
@@ -131,7 +137,7 @@ export function AssigneePicker({
         {value ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => commit(null)}>
+            <DropdownMenuItem onSelect={() => commit(null, false)}>
               <X aria-hidden="true" className="size-3.5 shrink-0" />
               Unassign
             </DropdownMenuItem>
@@ -148,16 +154,18 @@ export function AssigneePicker({
  *
  * `"Them"` is excluded for the same reason it is never rendered: it means "one
  * of the other people, unknown", so offering it as a choice would let someone
- * assign an item to nobody in particular and think they had assigned it.
- * `"You"` is excluded because it has its own pinned row above.
+ * assign an item to nobody in particular and think they had assigned it. The
+ * user's own name is not filtered here — self is a dedicated `isSelf` flag
+ * now, not a magic string, so it is no longer confusable with a real name
+ * that happens to be in this list; the pinned self row above is simply
+ * always shown regardless.
  */
 export function assigneeSuggestions(hints: (string | null)[]): string[] {
   const seen = new Set<string>();
   for (const hint of hints) {
     const trimmed = hint?.trim();
     if (!trimmed) continue;
-    const lower = trimmed.toLowerCase();
-    if (lower === "them" || lower === "you") continue;
+    if (trimmed.toLowerCase() === "them") continue;
     seen.add(trimmed);
   }
   return [...seen].sort((a, b) => a.localeCompare(b));

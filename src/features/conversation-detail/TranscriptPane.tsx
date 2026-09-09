@@ -2,21 +2,15 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useRef } from "react";
 import type { TranscriptTurn } from "@/ipc";
 import { cn } from "@/lib/cn";
+import { formatMmSs } from "@/lib/time";
 import { READING_MAX_W } from "./layout";
 
-/** `mm:ss` from a turn's `ts_start_ms` (LLD-11 §3.2 `<TranscriptTurn>`). */
-function formatTs(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
-
+/** `mm:ss` from a turn's `ts_start_ms` (`<TranscriptTurn>`). */
 /**
  * A two-line turn (speaker + timestamp, then the text below) rather than a
  * single dense row — reads more like a real transcript, less like a log.
  * `You` gets the accent tint, everyone else a neutral one — v1 has no
- * diarization (LLD-03 §6.2), so "Them" is the only other bucket to color.
+ * diarization, so "Them" is the only other bucket to color.
  */
 const ROW_HEIGHT_PX = 76;
 
@@ -43,7 +37,7 @@ function TurnRow({ turn }: { turn: TranscriptTurn }) {
         <div className="flex items-baseline gap-2">
           <span className="type-body font-semibold text-primary">{turn.speaker_label}</span>
           <span className="type-caption text-tertiary tabular-nums">
-            {formatTs(turn.ts_start_ms)}
+            {formatMmSs(turn.ts_start_ms)}
           </span>
         </div>
         <p className="type-body-lg mt-0.5 text-primary leading-relaxed">{turn.text}</p>
@@ -53,9 +47,8 @@ function TurnRow({ turn }: { turn: TranscriptTurn }) {
 }
 
 /**
- * Dense-per-turn-count but generous-per-line (§15 leans `breathable` for
- * the text itself, `regular` for row rhythm) — virtualized above ~500 turns
- * per LLD-11 §3.2's `<TranscriptTurn>` note.
+ * Dense-per-turn-count but generous-per-line (leans `breathable` for
+ * the text itself, `regular` for row rhythm) — virtualized above ~500 turns.
  */
 const VIRTUALIZE_THRESHOLD = 200;
 
@@ -69,7 +62,7 @@ function VirtualizedTranscript({ turns }: { turns: TranscriptTurn[] }) {
   });
 
   return (
-    <div className={`${READING_MAX_W} max-h-[75vh] overflow-y-auto`} ref={parentRef}>
+    <div className={`${READING_MAX_W} mx-auto max-h-[75vh] overflow-y-auto`} ref={parentRef}>
       <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().flatMap((row) => {
           const turn = turns[row.index];
@@ -99,7 +92,7 @@ export function TranscriptPane({ turns }: { turns: TranscriptTurn[] }) {
   }
 
   return (
-    <div className={`${READING_MAX_W} max-h-[75vh] overflow-y-auto`}>
+    <div className={`${READING_MAX_W} mx-auto max-h-[75vh] overflow-y-auto`}>
       {turns.map((turn, i) => (
         // Transcript is a fixed, already-persisted array for a done
         // conversation — never reordered or appended to in place.

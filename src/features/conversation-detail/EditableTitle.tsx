@@ -6,12 +6,21 @@ import { useSetTitle } from "./useSetTitle";
 /** Matches the server-side cap in `commands::conversation::validate_name`. */
 const MAX_TITLE_LEN = 200;
 
-/** `<EditableTitle>` (LLD-11 §3.2). Click-to-edit; Enter/blur saves, Escape reverts. */
+/**
+ * `<EditableTitle>`. Click-to-edit; Enter/blur saves, Escape reverts.
+ *
+ * `headingClass` exists because the recording screen shows the same control
+ * one step down the type scale. It is a size, not a second implementation —
+ * the edit behaviour has to stay identical in both places, which is the whole
+ * reason the recording header calls this rather than growing its own.
+ */
 export function EditableTitle({
   conversationId,
+  headingClass = "type-h1",
   title,
 }: {
   conversationId: string;
+  headingClass?: string;
   title: string;
 }) {
   const [editing, setEditing] = useState(false);
@@ -39,7 +48,7 @@ export function EditableTitle({
   if (editing) {
     return (
       <Input
-        className="type-h1 h-auto min-w-0 flex-1 px-1.5 py-0.5 font-semibold"
+        className={`${headingClass} h-auto min-w-0 flex-1 px-1.5 py-0.5 font-semibold`}
         maxLength={MAX_TITLE_LEN}
         onBlur={commit}
         onChange={(e) => setDraft(e.target.value)}
@@ -69,7 +78,7 @@ export function EditableTitle({
       }}
       type="button"
     >
-      <h1 className="type-h1 truncate text-primary">{title}</h1>
+      <h1 className={`${headingClass} truncate text-primary`}>{title}</h1>
       <Pencil
         aria-hidden="true"
         className="size-3.5 shrink-0 text-tertiary opacity-0 group-hover:opacity-100"

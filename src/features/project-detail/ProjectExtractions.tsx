@@ -21,23 +21,22 @@ import {
 
 /**
  * Project Memory's reactive structured sections — "straight SQL queries
- * against DB, no agent call, always current" (05_PROJECT_MEMORY.md §"Two
- * kinds of content").
+ * against DB, no agent call, always current."
  *
  * Renders through the **same** `DecisionsSection`/`OpenQuestionsSection`/
  * `GlobalActionItemsList` components Conversation Detail and Home use,
  * inside the same `<Section>` wrapper with the same icons — deliberately not
  * lookalikes, so a row here and a row there stay pixel-identical.
  *
- * Action Items — W19: 05's locked five-section list doesn't include this
- * (its stated reason: action items aggregate per person on the Dashboard,
+ * Action Items — the project memory spec's locked five-section list doesn't
+ * include this (its stated reason: action items aggregate per person on the Dashboard,
  * across every project, not per project). This section is a deliberate,
  * explicit deviation from that — the project page needed its own "+" to add
  * an item scoped to the project without a source conversation, and once
  * there's a "+" there has to be somewhere for it to add the item *to*.
  *
- * W18 paged Decisions/Open Questions — they used to load under a shared
- * 500-row ceiling that truncated in silence.
+ * Decisions/Open Questions are paged rather than loaded under a shared
+ * row ceiling, which would otherwise risk truncating in silence.
  */
 const PAGE_SIZE = 20;
 
@@ -63,7 +62,7 @@ function useProjectActionItemMutations(projectId: string) {
 
   const create = useMutation({
     mutationFn: (text: string) =>
-      commands.conversation.createStandaloneActionItem(projectId, text, null),
+      commands.conversation.createStandaloneActionItem(projectId, text, null, false),
     onSuccess: invalidate,
     onError: () => toast.error("Couldn't add the action item. Try again."),
   });
@@ -74,8 +73,8 @@ function useProjectActionItemMutations(projectId: string) {
     onError: () => toast.error("Couldn't update the action item. Try again."),
   });
   const setAssignee = useMutation({
-    mutationFn: (vars: { itemId: string; assigneeHint: string | null }) =>
-      commands.conversation.setActionItemAssignee(vars.itemId, vars.assigneeHint),
+    mutationFn: (vars: { itemId: string; assigneeHint: string | null; isSelf: boolean }) =>
+      commands.conversation.setActionItemAssignee(vars.itemId, vars.assigneeHint, vars.isSelf),
     onSuccess: invalidate,
     onError: () => toast.error("Couldn't update the assignee. Try again."),
   });
@@ -93,7 +92,9 @@ function ProjectActionItems({ projectId }: { projectId: string }) {
       <GlobalActionItemsList
         addPlaceholder="Add an action item for this project…"
         done={done}
-        onAssigneeChange={(itemId, assigneeHint) => setAssignee.mutate({ itemId, assigneeHint })}
+        onAssigneeChange={(itemId, assigneeHint, isSelf) =>
+          setAssignee.mutate({ itemId, assigneeHint, isSelf })
+        }
         onCreate={(text) => create.mutate(text)}
         onDoneChange={(itemId, doneValue) => setDone.mutate({ itemId, done: doneValue })}
         open={open}
@@ -148,8 +149,8 @@ function ProjectDecisions({ projectId }: { projectId: string }) {
  */
 function useSetOpenQuestionOwnerGlobal(projectId: string) {
   return useMutation({
-    mutationFn: (vars: { questionId: string; ownerHint: string | null }) =>
-      commands.conversation.setOpenQuestionOwner(vars.questionId, vars.ownerHint),
+    mutationFn: (vars: { questionId: string; ownerHint: string | null; isSelf: boolean }) =>
+      commands.conversation.setOpenQuestionOwner(vars.questionId, vars.ownerHint, vars.isSelf),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: qk.projectOpenQuestions(projectId, false) });
       queryClient.invalidateQueries({ queryKey: qk.projectOpenQuestions(projectId, true) });
@@ -198,7 +199,9 @@ function ProjectOpenQuestions({ projectId }: { projectId: string }) {
       {loaded ? (
         <>
           <OpenQuestionsSection
-            onOwnerChange={(questionId, ownerHint) => setOwner.mutate({ questionId, ownerHint })}
+            onOwnerChange={(questionId, ownerHint, isSelf) =>
+              setOwner.mutate({ questionId, ownerHint, isSelf })
+            }
             questions={active.items}
           />
           <RevealMore

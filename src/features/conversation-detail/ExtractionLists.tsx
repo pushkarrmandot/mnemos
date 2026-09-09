@@ -1,103 +1,97 @@
-import { Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SegmentedTabs } from "@/components/app/SegmentedTabs";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { ActionItem, Decision, OpenQuestion } from "@/ipc";
+import {
+  AddItemRow,
+  EXTRACTION_ROW_CLASS,
+  ExtractionRowActions,
+  ExtractionRowInput,
+  HintBadge,
+  personHint,
+  useRowTextEditor,
+} from "@/features/shared/extractionRow";
+import type { ActionItem, Decision, ExtractionKind, OpenQuestion } from "@/ipc";
 import { AssigneePicker, assigneeSuggestions } from "./AssigneePicker";
-import { CopyButton } from "./CopyButton";
 import { useCreateActionItem } from "./useCreateActionItem";
 import { useSetActionItemAssignee } from "./useSetActionItemAssignee";
 import { useSetActionItemDone } from "./useSetActionItemDone";
 
-/** `regular` density (DESIGN_SYSTEM §15 — "Action Item rows, Decision cards"). */
-const ROW_CLASS =
-  "group flex min-h-11 items-start gap-3 rounded-md px-2 py-3 motion-quick hover:bg-hover";
-/** Per-row copy (W17b) — hidden until the row is hovered/focused, so the
- * list doesn't read as cluttered with an icon on every line at rest. */
-const ROW_COPY_CLASS = "shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100";
+export { personHint } from "@/features/shared/extractionRow";
 
 /**
- * W17c: `"Them"` is not a person. v1 labels speakers purely by source channel
- * (mic = "You", system = "Them"), so in a fourteen-person meeting `"Them"`
- * means "one of fourteen, unknown" — a badge that occupies space, looks like
- * data and carries none. Real names the model picked out of the transcript
- * ("Sarah") are genuinely useful and stay; the channel fallback is dropped so
- * the row falls through to its unassigned rendering instead.
+ * A row the user has taken ownership of, by editing it or adding it by hand.
  *
- * "You" is deliberately kept: it *is* reliable, because the mic channel is
- * ground truth for the user's own speech.
+ * Worth a marker because it is the only visible signal of a real behavioural
+ * difference: regenerating rewrites everything the model produced and leaves
+ * these alone. Rendered quietly — it is reassurance, not a status people need
+ * to scan for.
  */
-export function personHint(hint: string | null): string | null {
-  if (!hint) return null;
-  const trimmed = hint.trim();
-  if (trimmed.length === 0) return null;
-  return trimmed.toLowerCase() === "them" ? null : trimmed;
+function YoursBadge() {
+  return <span className="type-caption text-tertiary">edited</span>;
 }
 
-/** Small rounded pill for a hint (assignee, due date, decided-by, raised-by). */
-function HintBadge({ children, emphasis = false }: { children: string; emphasis?: boolean }) {
-  return (
-    <span
-      className={`type-caption inline-flex items-center rounded-full px-2 py-0.5 ${
-        emphasis ? "bg-accent-primary-bg text-accent-primary-text" : "bg-subtle text-tertiary"
-      }`}
-    >
-      {children}
-    </span>
+/**
+ * The callbacks every editable/deletable row needs. Grouped into one prop so
+ * the three sections don't each grow a near-identical pair of handlers whose
+ * signatures can drift apart.
+ */
+type RowMutations = {
+  onDelete: (kind: ExtractionKind, itemId: string) => void;
+  onTextChange: (kind: ExtractionKind, itemId: string, text: string) => void;
+};
+
+function ActionItemRow({
+  item,
+  mutations,
+  onAssigneeChange,
+  onDoneChange,
+  suggestions,
+}: {
+  item: ActionItem;
+  mutations: RowMutations;
+  onAssigneeChange: (assigneeHint: string | null, isSelf: boolean) => void;
+  onDoneChange: (done: boolean) => void;
+  suggestions: string[];
+}) {
+  const editor = useRowTextEditor(item.text, (next) =>
+    mutations.onTextChange("action_item", item.id, next),
   );
-}
-
-/** Inline "+ Add action item" row — click to reveal a text input, Enter/blur commits. */
-function AddActionItemRow({ conversationId }: { conversationId: string }) {
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
-  const create = useCreateActionItem(conversationId);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed) {
-      create.mutate(trimmed);
-    }
-    setDraft("");
-    setAdding(false);
-  };
-
-  if (adding) {
-    return (
-      <li className={ROW_CLASS}>
-        <Plus aria-hidden="true" className="mt-1 size-4 shrink-0 text-tertiary" />
-        <input
-          autoFocus
-          className="type-body min-w-0 flex-1 bg-transparent text-primary outline-none placeholder:text-tertiary"
-          onBlur={commit}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setDraft("");
-              setAdding(false);
-            }
-          }}
-          placeholder="Add an action item…"
-          value={draft}
-        />
-      </li>
-    );
-  }
 
   return (
-    <li>
-      <button
-        className={`${ROW_CLASS} w-full text-left text-secondary hover:text-primary`}
-        onClick={() => setAdding(true)}
-        type="button"
-      >
-        <Plus aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        <span className="type-body">Add action item</span>
-      </button>
+    <li className={EXTRACTION_ROW_CLASS}>
+      <Checkbox
+        checked={item.done}
+        className="mt-0.5 size-4"
+        onCheckedChange={(checked) => onDoneChange(checked === true)}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex flex-wrap items-center gap-1.5">
+          <AssigneePicker
+            isSelf={item.assignee_is_self}
+            onChange={(next) => onAssigneeChange(next.hint, next.isSelf)}
+            suggestions={suggestions}
+            value={personHint(item.assignee_hint)}
+          />
+          {item.due_hint ? <HintBadge>{item.due_hint}</HintBadge> : null}
+          {item.added_manually ? <YoursBadge /> : null}
+        </div>
+        {editor.editing ? (
+          <ExtractionRowInput {...editor.inputProps} aria-label="Edit action item" />
+        ) : (
+          <p className={`type-body text-primary ${item.done ? "text-tertiary line-through" : ""}`}>
+            {item.text}
+          </p>
+        )}
+      </div>
+      {editor.editing ? null : (
+        <ExtractionRowActions
+          copyLabel="Copy action item"
+          copyText={item.text}
+          deleteLabel="Remove action item"
+          onDelete={() => mutations.onDelete("action_item", item.id)}
+          onEdit={editor.start}
+        />
+      )}
     </li>
   );
 }
@@ -106,20 +100,23 @@ function AddActionItemRow({ conversationId }: { conversationId: string }) {
  * Open/Done as a client-side split, deliberately not a server query. A
  * conversation's own action items are bounded by one meeting — a few dozen
  * rows at most — so the whole list is already loaded and cheap to filter in
- * the browser. This is the "bounded by one meeting" half of W18's governing
- * rule; only the cross-conversation aggregates (Dashboard, project pages)
- * needed the paging machinery.
+ * the browser. This is the "bounded by one meeting" half of the governing
+ * paging rule; only the cross-conversation aggregates (Dashboard, project
+ * pages) need the paging machinery.
  */
 export function ActionItemsSection({
   conversationId,
   items,
+  mutations,
 }: {
   conversationId: string;
   items: ActionItem[];
+  mutations: RowMutations;
 }) {
   const [tab, setTab] = useState<"open" | "done">("open");
   const setDone = useSetActionItemDone(conversationId);
   const setAssignee = useSetActionItemAssignee(conversationId);
+  const create = useCreateActionItem(conversationId);
   // The picker's "heard in this meeting" shortlist is drawn from every
   // assignee the model produced across this conversation's own action items —
   // a far better shortlist than the full contact book, and it needs no extra
@@ -155,42 +152,86 @@ export function ActionItemsSection({
           </p>
         ) : (
           visible.map((item) => (
-            <li className={ROW_CLASS} key={item.id}>
-              <Checkbox
-                checked={item.done}
-                className="mt-0.5 size-4"
-                onCheckedChange={(checked) =>
-                  setDone.mutate({ actionItemId: item.id, done: checked === true })
-                }
-              />
-              <div className="min-w-0 flex-1">
-                <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                  <AssigneePicker
-                    onChange={(next) =>
-                      setAssignee.mutate({ actionItemId: item.id, assigneeHint: next })
-                    }
-                    suggestions={suggestions}
-                    value={personHint(item.assignee_hint)}
-                  />
-                  {item.due_hint ? <HintBadge>{item.due_hint}</HintBadge> : null}
-                </div>
-                <p
-                  className={`type-body text-primary ${item.done ? "text-tertiary line-through" : ""}`}
-                >
-                  {item.text}
-                </p>
-              </div>
-              <CopyButton className={ROW_COPY_CLASS} label="Copy action item" text={item.text} />
-            </li>
+            <ActionItemRow
+              item={item}
+              key={item.id}
+              mutations={mutations}
+              onAssigneeChange={(assigneeHint, isSelf) =>
+                setAssignee.mutate({ actionItemId: item.id, assigneeHint, isSelf })
+              }
+              onDoneChange={(done) => setDone.mutate({ actionItemId: item.id, done })}
+              suggestions={suggestions}
+            />
           ))
         )}
-        {tab === "open" ? <AddActionItemRow conversationId={conversationId} /> : null}
+        {tab === "open" ? (
+          <AddItemRow onCreate={(text) => create.mutate(text)} placeholder="Add an action item…" />
+        ) : null}
       </ul>
     </>
   );
 }
 
-export function DecisionsSection({ decisions }: { decisions: Decision[] }) {
+function DecisionRow({ decision, mutations }: { decision: Decision; mutations?: RowMutations }) {
+  const editor = useRowTextEditor(decision.statement, (next) =>
+    mutations?.onTextChange("decision", decision.id, next),
+  );
+  const decidedByName = personHint(decision.decided_by_hint);
+  const decidedBy = decidedByName
+    ? decision.decided_by_is_self
+      ? `${decidedByName} (you)`
+      : decidedByName
+    : null;
+
+  return (
+    <li className={EXTRACTION_ROW_CLASS}>
+      <div className="min-w-0 flex-1">
+        {decidedBy || decision.added_manually ? (
+          <div className="mb-1 flex flex-wrap items-center gap-1.5">
+            {decidedBy ? <HintBadge>{decidedBy}</HintBadge> : null}
+            {decision.added_manually ? <YoursBadge /> : null}
+          </div>
+        ) : null}
+        {editor.editing ? (
+          <ExtractionRowInput {...editor.inputProps} aria-label="Edit decision" />
+        ) : (
+          <p className="type-body text-primary">{decision.statement}</p>
+        )}
+        {/* The quote is the transcript's own words, so it is shown but never
+            edited — rewriting what someone said would make it evidence for a
+            claim they didn't make. It travels with the statement on delete. */}
+        {decision.quote ? (
+          <p className="type-caption mt-1.5 border-subtle border-l-2 pl-2 text-tertiary italic">
+            "{decision.quote}"
+          </p>
+        ) : null}
+      </div>
+      {mutations && !editor.editing ? (
+        <ExtractionRowActions
+          copyLabel="Copy decision"
+          copyText={decision.statement}
+          deleteLabel="Remove decision"
+          onDelete={() => mutations.onDelete("decision", decision.id)}
+          onEdit={editor.start}
+        />
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * `mutations` is optional: the Project page renders decisions from several
+ * conversations at once through this same component, and a row there has no
+ * single cached conversation document to patch. Rows render read-only there
+ * rather than the two pages growing lookalike implementations.
+ */
+export function DecisionsSection({
+  decisions,
+  mutations,
+}: {
+  decisions: Decision[];
+  mutations?: RowMutations;
+}) {
   if (decisions.length === 0) {
     return <p className="type-body text-secondary">No decisions were found.</p>;
   }
@@ -198,22 +239,7 @@ export function DecisionsSection({ decisions }: { decisions: Decision[] }) {
   return (
     <ul>
       {decisions.map((decision) => (
-        <li className={ROW_CLASS} key={decision.id}>
-          <div className="min-w-0 flex-1">
-            {personHint(decision.decided_by_hint) ? (
-              <div className="mb-1">
-                <HintBadge>{personHint(decision.decided_by_hint) as string}</HintBadge>
-              </div>
-            ) : null}
-            <p className="type-body text-primary">{decision.statement}</p>
-            {decision.quote ? (
-              <p className="type-caption mt-1.5 border-subtle border-l-2 pl-2 text-tertiary italic">
-                "{decision.quote}"
-              </p>
-            ) : null}
-          </div>
-          <CopyButton className={ROW_COPY_CLASS} label="Copy decision" text={decision.statement} />
-        </li>
+        <DecisionRow decision={decision} key={decision.id} mutations={mutations} />
       ))}
     </ul>
   );
@@ -221,11 +247,93 @@ export function DecisionsSection({ decisions }: { decisions: Decision[] }) {
 
 /**
  * Structural minimum rather than `OpenQuestion` itself, so Project Memory can
- * pass `OpenQuestionWithSource` rows (05_PROJECT_MEMORY.md §3) into the exact
- * same component — the whole point being that the two pages render open
- * questions identically rather than growing lookalike implementations.
+ * pass `OpenQuestionWithSource` rows into the exact same component — the whole
+ * point being that the two pages render open questions identically rather than
+ * growing lookalike implementations.
  */
-type QuestionRow = Pick<OpenQuestion, "id" | "question" | "raised_by_hint" | "owner_hint">;
+type QuestionRow = Pick<
+  OpenQuestion,
+  | "id"
+  | "question"
+  | "raised_by_hint"
+  | "raised_by_is_self"
+  | "owner_hint"
+  | "owner_is_self"
+  | "resolved_conv_id"
+> &
+  Partial<Pick<OpenQuestion, "added_manually">>;
+
+function OpenQuestionRow({
+  mutations,
+  onOwnerChange,
+  onResolvedChange,
+  question,
+  suggestions,
+}: {
+  mutations?: RowMutations;
+  onOwnerChange?: (ownerHint: string | null, isSelf: boolean) => void;
+  onResolvedChange?: (resolved: boolean) => void;
+  question: QuestionRow;
+  suggestions: string[];
+}) {
+  const editor = useRowTextEditor(question.question, (next) =>
+    mutations?.onTextChange("open_question", question.id, next),
+  );
+  const raisedByName = personHint(question.raised_by_hint);
+  const raisedBy = raisedByName
+    ? question.raised_by_is_self
+      ? `${raisedByName} (you)`
+      : raisedByName
+    : null;
+  const resolved = question.resolved_conv_id != null;
+
+  return (
+    <li className={EXTRACTION_ROW_CLASS}>
+      {onResolvedChange ? (
+        <Checkbox
+          aria-label={resolved ? "Reopen this question" : "Mark this question answered"}
+          checked={resolved}
+          className="mt-0.5 size-4"
+          onCheckedChange={(checked) => onResolvedChange(checked === true)}
+        />
+      ) : null}
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex flex-wrap items-center gap-1.5">
+          {raisedBy ? <HintBadge>{`asked by ${raisedBy}`}</HintBadge> : null}
+          {/* Two visually distinct pills on purpose: who *asked* is a fact
+              about the past and is never edited here; who *owes the answer*
+              is the thing this row exists to track, so only that one is a
+              control. */}
+          {onOwnerChange ? (
+            <AssigneePicker
+              isSelf={question.owner_is_self}
+              onChange={(next) => onOwnerChange(next.hint, next.isSelf)}
+              suggestions={suggestions}
+              value={personHint(question.owner_hint)}
+            />
+          ) : null}
+          {question.added_manually ? <YoursBadge /> : null}
+        </div>
+        {editor.editing ? (
+          <ExtractionRowInput {...editor.inputProps} aria-label="Edit question" />
+        ) : (
+          <p className={`type-body text-primary ${resolved ? "text-tertiary line-through" : ""}`}>
+            {question.question}
+          </p>
+        )}
+      </div>
+      {mutations && !editor.editing ? (
+        <ExtractionRowActions
+          copyLabel="Copy question"
+          copyText={question.question}
+          deleteLabel="Remove question"
+          onDelete={() => mutations.onDelete("open_question", question.id)}
+          onEdit={editor.start}
+        />
+      ) : null}
+    </li>
+  );
+}
 
 /**
  * `onOwnerChange` is a callback, not a bound mutation hook, because the two
@@ -234,46 +342,43 @@ type QuestionRow = Pick<OpenQuestion, "id" | "question" | "raised_by_hint" | "ow
  * rows can each belong to a different conversation and its lists are two
  * disjoint paged queries (`usePagedOpenQuestions`) rather than one document.
  * Keeping the mutation out of this component is what let it stay identical
- * between the two pages.
+ * between the two pages. `onResolvedChange` and `mutations` follow the same
+ * rule for the same reason.
  */
 export function OpenQuestionsSection({
+  mutations,
   onOwnerChange,
+  onResolvedChange,
   questions,
 }: {
-  onOwnerChange?: (questionId: string, ownerHint: string | null) => void;
+  mutations?: RowMutations;
+  onOwnerChange?: (questionId: string, ownerHint: string | null, isSelf: boolean) => void;
+  onResolvedChange?: (questionId: string, resolved: boolean) => void;
   questions: QuestionRow[];
 }) {
+  const suggestions = assigneeSuggestions(questions.map((q) => q.raised_by_hint));
+
   if (questions.length === 0) {
     return <p className="type-body text-secondary">No open questions were found.</p>;
   }
 
-  const suggestions = assigneeSuggestions(questions.map((q) => q.raised_by_hint));
-
   return (
     <ul>
       {questions.map((question) => (
-        <li className={ROW_CLASS} key={question.id}>
-          <div className="min-w-0 flex-1">
-            <div className="mb-1 flex flex-wrap items-center gap-1.5">
-              {personHint(question.raised_by_hint) ? (
-                <HintBadge>{`asked by ${personHint(question.raised_by_hint)}`}</HintBadge>
-              ) : null}
-              {/* Two visually distinct pills on purpose: who *asked* is a fact
-                  about the past and is never edited here; who *owes the
-                  answer* is the thing this row exists to track, so only that
-                  one is a control. */}
-              {onOwnerChange ? (
-                <AssigneePicker
-                  onChange={(next) => onOwnerChange(question.id, next)}
-                  suggestions={suggestions}
-                  value={personHint(question.owner_hint)}
-                />
-              ) : null}
-            </div>
-            <p className="type-body text-primary">{question.question}</p>
-          </div>
-          <CopyButton className={ROW_COPY_CLASS} label="Copy question" text={question.question} />
-        </li>
+        <OpenQuestionRow
+          key={question.id}
+          mutations={mutations}
+          onOwnerChange={
+            onOwnerChange
+              ? (ownerHint, isSelf) => onOwnerChange(question.id, ownerHint, isSelf)
+              : undefined
+          }
+          onResolvedChange={
+            onResolvedChange ? (resolved) => onResolvedChange(question.id, resolved) : undefined
+          }
+          question={question}
+          suggestions={suggestions}
+        />
       ))}
     </ul>
   );

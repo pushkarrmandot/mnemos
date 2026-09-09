@@ -7,8 +7,8 @@ import { qk, staleTimes } from "@/queries/keys";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `<ProcessingRecoveryModal>` — 12_CORNER_CASES.md "App crashes & recovery"
- * §Mid-processing crash: "This conversation was still processing when
+ * `<ProcessingRecoveryModal>` — "App crashes & recovery", mid-processing
+ * crash case: "This conversation was still processing when
  * Mnemos closed. Continue?". Mirrors `RecordingRecoveryModal` field-for-
  * field (same single-slot-modal / atomic-delete / closeIfLast reasoning —
  * see that file's own comments for why each piece is shaped this way).
@@ -17,7 +17,7 @@ import { useUIStore } from "@/stores/ui";
  * whole post-recording pipeline from the top rather than resuming the exact
  * last-completed step — `mic.wav`/`system.wav` are already complete (it was
  * the pipeline, not the capture, that got interrupted), and a full redo is
- * now fast (W17b's chunking fix) and correct regardless of which step the
+ * fast (thanks to chunking) and correct regardless of which step the
  * crash landed in. **Discard** reuses the same atomic `delete_conversation`
  * path everything else in this app uses.
  */
