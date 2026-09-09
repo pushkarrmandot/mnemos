@@ -1,9 +1,8 @@
-"""Single-slot job queue (BACKEND_STANDARDS §2 "Job queue" —
-`ThreadPoolExecutor(max_workers=1)`, models are not thread-safe). Every
-accepted job is parked in `pending_jobs.json` immediately, moved to
-`current_job.json` when it starts executing, and removed from both once it
-completes — this is the state a crashed worker leaves behind for the Rust
-supervisor to replay (LLD-02 §6).
+"""Single-slot job queue (`ThreadPoolExecutor(max_workers=1)`, models are
+not thread-safe). Every accepted job is parked in `pending_jobs.json`
+immediately, moved to `current_job.json` when it starts executing, and
+removed from both once it completes — this is the state a crashed worker
+leaves behind for the Rust supervisor to replay.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ class JobExecutor:
         self._pending: list[dict[str, Any]] = []
         self._pending_lock = threading.Lock()
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
-        # Idempotency cache (LLD-02 §6): re-issuing a job this process already
+        # Idempotency cache: re-issuing a job this process already
         # completed is a no-op returning the cached result. Only meaningful
         # within one worker lifetime — a full restart naturally re-runs
         # replayed jobs, which is safe because `ping` has no side effects.

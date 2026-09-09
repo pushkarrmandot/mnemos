@@ -1,14 +1,15 @@
-"""Per-conversation extraction (LLD-05 §4) — the `extracting` pipeline step.
-One `run_agent_extraction` turn (plus at most one schema-retry turn) over a
-transcript, returning the validated LLD-05 §4.3 payload as the job result.
+"""Per-conversation extraction — the `extracting` pipeline step. One
+`run_agent_extraction` turn (plus at most one schema-retry turn) over a
+transcript, returning the validated extraction payload as the job result.
 
 The caller (Rust — `memory::extract_conversation`) is the one that persists
-`extraction.json`/`summary.md`/the structured rows, per LLD-05 §4.4's "worker
-does not touch SQLite" and this wave's design of keeping this handler
-file-path-agnostic (it receives `transcript` as data, not a path — see
-`product_docs/lld/LLD_05_MEMORY_SYSTEM.md`'s "Implementation status" for why
-that's a deliberate deviation from the LLD's "worker reads the file itself"
-sketch).
+`extraction.json`/`summary.md`/the structured rows — the worker never
+touches SQLite. This handler is deliberately file-path-agnostic: it takes
+`transcript` as data in `params`, not a path to read itself. That keeps the
+worker stateless with respect to the conversation blob directory (no
+filesystem coupling to Rust's storage layout) and makes this handler
+trivially unit-testable with an in-memory transcript, at the cost of the
+caller having to load and pass the transcript in.
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ from mnemos_worker.errors import VALIDATION, WorkerJobError
 from mnemos_worker.extraction_schema import validate_extraction_payload
 from mnemos_worker.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_prompt
 
-# LLD-05 §4.2 — placeholder cap pending LLD-07 exposing the runner's real
-# context window (§10 Q3). ~500k chars ≈ Claude Sonnet's ~200k token budget.
+# Placeholder cap pending the agent runner exposing its real context window
+# size. ~500k chars ≈ Claude Sonnet's ~200k token budget.
 MAX_TRANSCRIPT_CHARS = 500_000
 
 DEFAULT_TIMEOUT_MS = 30_000

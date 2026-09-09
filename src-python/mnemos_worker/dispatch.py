@@ -1,5 +1,5 @@
-"""Method registry (BACKEND_STANDARDS §2 "Job queue"): `@method("name")`
-decorates a plain handler function, `DISPATCH_TABLE` collects them.
+"""Method registry: `@method("name")` decorates a plain handler function,
+`DISPATCH_TABLE` collects them.
 """
 
 from __future__ import annotations

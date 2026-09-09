@@ -1,6 +1,6 @@
-"""The only real job kind this wave ships. Real job handlers (transcription,
-extraction) land in W7/W11 — this exists to prove the job-queue + park/replay
-machinery end-to-end (§6 of LLD-02), not to do real work.
+"""One job kind among several (see the `jobs` package for transcription,
+extraction, and memory-refresh handlers) — this one exists to prove the
+job-queue + park/replay machinery end-to-end, not to do real work.
 """
 
 from __future__ import annotations

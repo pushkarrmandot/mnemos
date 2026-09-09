@@ -1,6 +1,5 @@
 """Emits `{"method": "heartbeat"}` on stdout every `interval_s` (30s in
-production; the health task on the Rust side treats a 45s silence as stuck —
-BACKEND_STANDARDS §2 "Health checks").
+production; the health task on the Rust side treats a 45s silence as stuck).
 """
 
 from __future__ import annotations

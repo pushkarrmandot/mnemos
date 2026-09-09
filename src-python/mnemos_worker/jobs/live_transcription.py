@@ -1,6 +1,6 @@
-"""Live-transcription poll loop (LLD-03 §5.1). One `LiveTranscriptionThread`
-per active recording; v1 asserts at most one recording in flight (matches
-Rust's `active: Mutex<Option<ActiveSession>>`). `LiveTranscriptionManager`
+"""Live-transcription poll loop. One `LiveTranscriptionThread` per active
+recording; v1 asserts at most one recording in flight (matches Rust's
+`active: Mutex<Option<ActiveSession>>`). `LiveTranscriptionManager`
 dispatches `subscribe_live_transcript`/`unsubscribe_live_transcript` directly
 from `__main__`'s read loop — same reasoning as `CaptureManager`
 (`mnemos_worker/capture/manager.py`): these are fast, Ack-only operations
@@ -19,8 +19,7 @@ from mnemos_worker.models.transcription import ParakeetModel, Segment
 log = get_logger(component="live-transcription")
 
 # `ChunkedWavWriter` always writes a fixed 44-byte RIFF/fmt/data header (no
-# extra chunks) — the cursor starts past it, per LLD-03 §5.1's
-# `_wav_data_offset`.
+# extra chunks) — the cursor starts past it, matching `_wav_data_offset`.
 WAV_HEADER_BYTES = 44
 BYTES_PER_SEC = 16_000 * 2  # 16 kHz mono 16-bit PCM
 #: Live transcription reads the mic channel only, so every segment it emits is
@@ -51,18 +50,17 @@ class LiveTranscriptionThread(threading.Thread):
         # which `__main__`'s single-threaded read loop dispatches directly
         # (module docstring above) so it "must never queue behind a slow
         # job." `ParakeetModel.get()` blocks on `_instance_lock` until
-        # warm-up finishes loading real weights (W9 2026-08-22 fix) — doing
-        # that here would block every other RPC, including the
-        # `start_recording` caller waiting on this very subscribe call, for
-        # however long model load takes (confirmed live: 30-40s).
+        # warm-up finishes loading real weights — doing that here would
+        # block every other RPC, including the `start_recording` caller
+        # waiting on this very subscribe call, for however long model load
+        # takes (confirmed live: 30-40s).
         self._transcribe_pcm = transcribe_pcm
         self._cursor = WAV_HEADER_BYTES
         self._should_exit = threading.Event()
         self._joined = threading.Event()
-        # F (debug-session patch): logged at most once per thread — see the
-        # warm-up check in `_tick()`.
+        # Logged at most once per thread — see the warm-up check in `_tick()`.
         self._warned_not_ready = False
-        # W17b: last readiness state actually notified to the frontend —
+        # Last readiness state actually notified to the frontend —
         # `None` until the first tick, so the first check always fires (even
         # if that first observation is already "ready", the UI still needs
         # to be told at least once). Distinct from `_warned_not_ready` above,
@@ -88,16 +86,16 @@ class LiveTranscriptionThread(threading.Thread):
             self._joined.set()
 
     def _notify_warmup_state_if_changed(self) -> None:
-        """W17b: tells the frontend when live transcription is blocked on
-        model warm-up, and when it stops being blocked — the gap this closes
-        is real: before this, `is_ready()` being False just made `_tick()`
-        return early with a log line nobody sees, so a user who hit Record
-        before warm-up finished (first-ever launch, or right after the
-        worker restarts) saw a silent "Listening…" for however long warm-up
-        takes, with nothing distinguishing "no one has spoken yet" from
-        "the model isn't loaded yet". Checked unconditionally at the top of
-        every tick — independent of whether there's new audio to transcribe
-        — so it fires on the very first tick, before any audio-length gating.
+        """Tells the frontend when live transcription is blocked on model
+        warm-up, and when it stops being blocked. Without this, `is_ready()`
+        being False just makes `_tick()` return early with a log line nobody
+        sees, so a user who hits Record before warm-up finishes (first-ever
+        launch, or right after the worker restarts) would see a silent
+        "Listening…" for however long warm-up takes, with nothing
+        distinguishing "no one has spoken yet" from "the model isn't loaded
+        yet". Checked unconditionally at the top of every tick — independent
+        of whether there's new audio to transcribe — so it fires on the very
+        first tick, before any audio-length gating.
         """
         ready = self._transcribe_pcm is not None or ParakeetModel.is_ready()
         if ready == self._last_ready_notified:
@@ -180,13 +178,14 @@ class LiveTranscriptionThread(threading.Thread):
                 {
                     "conversation_id": self._conv,
                     "chunk": {
-                        # W17c: this job only ever reads `mic.wav`, so every
-                        # live segment is the user by construction — the same
-                        # rule `merge_transcripts` applies to the mic channel
-                        # in the final pass. Parakeet exposes no speaker hint
-                        # of its own, so this was always `None`, and the live
-                        # pane rendered every turn as an anonymous "…" while
-                        # the final transcript correctly said "You".
+                        # This job only ever reads `mic.wav`, so every live
+                        # segment is the user by construction — the same rule
+                        # `merge_transcripts` applies to the mic channel in
+                        # the final pass. Parakeet exposes no speaker hint of
+                        # its own (`seg.speaker_label_hint` is always `None`
+                        # here), so this always falls back to
+                        # `MIC_SPEAKER_LABEL`, keeping the live pane
+                        # consistent with the final transcript's "You" label.
                         "speaker_label_hint": seg.speaker_label_hint or MIC_SPEAKER_LABEL,
                         "text": seg.text,
                         "ts_start_ms": base_ms + seg.ts_start_ms,
@@ -209,12 +208,12 @@ class LiveTranscriptionManager:
     """Single-active-thread-per-conversation coordinator, mirroring
     `CaptureManager`'s shape. `subscribe`/`unsubscribe` are idempotent: a
     repeat subscribe for an already-active conversation, or an unsubscribe
-    for an unknown one, is a no-op returning `{}` (LLD-03 §3.2)."""
+    for an unknown one, is a no-op returning `{}`."""
 
     def __init__(self, notify: NotifyFn, transcribe_pcm: TranscribePcmFn | None = None) -> None:
         self._notify = notify
         # Injected only by tests, so a fake model can stand in without
-        # touching `ParakeetModel`'s real (mlx/parakeet.cpp) backend load.
+        # touching `ParakeetModel`'s real (mlx/onnx_asr) backend load.
         # Production always passes `None`, which lazily resolves to
         # `ParakeetModel.get()` per thread — already warmed at worker
         # startup (`ParakeetModel.warm_up()` in `__main__.py`).

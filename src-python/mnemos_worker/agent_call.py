@@ -1,4 +1,4 @@
-"""Shared one-call-plus-one-retry policy (LLD-05 §4.5) for both memory jobs:
+"""Shared one-call-plus-one-retry policy for both memory jobs:
 call `run_agent_extraction`, validate the JSON, and on a schema mismatch
 retry exactly once with the validator's error appended as a nudge. A true
 infra failure (agent timeout, CLI missing/not-logged-in/stream-corrupt)

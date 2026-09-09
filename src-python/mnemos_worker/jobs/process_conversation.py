@@ -1,20 +1,22 @@
-"""Post-processing transcription phase (LLD-03 §6) — the `transcribing`
-step of the eventual `process_conversation` job. This module owns only that
-one phase: two full-file Parakeet passes (one per source WAV) merged by
-timestamp into `transcript.json`, "You" (mic)/"Them" (system) labeled by
-source file only (v1 tier — no diarization model, see LLD-03 §0b/HLD gaps).
-Later steps (diarization, extraction, summary) belong to LLD-04/LLD-05 —
-W10/W11 — and are not built here; no `process_conversation` *orchestrator*
-exists yet either (that's whichever wave first chains steps a-h together).
+"""Post-processing transcription phase — the `transcribing` step of the
+`process_conversation` job. This module owns only that one phase: two
+full-file Parakeet passes (one per source WAV) merged by timestamp into
+`transcript.json`, "You" (mic)/"Them" (system) labeled by source file only
+(v1 tier — no diarization model). Extraction and memory-refresh already
+exist as their own job handlers elsewhere in this package
+(`extract_memory.py`, `refresh_project_memory.py`), but nothing here yet
+wires this job's transcript output into them automatically — no
+`process_conversation` *orchestrator* exists to chain those steps together.
 
-Registered as the `transcribe_final` RPC method (LLD-03 §3.2): runs through
-the job executor (not the capture/live-transcript fast path) because a
-full-file Parakeet pass can take up to ~30s (HLD NFR budget) and must not
-block Start/Stop Recording, but *can* be queued like any other job.
+Registered as the `transcribe_final` RPC method: runs through the job
+executor (not the capture/live-transcript fast path) because a full-file
+Parakeet pass can take up to ~30s and must not block Start/Stop Recording,
+but *can* be queued like any other job.
 """
 
 from __future__ import annotations
 
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +33,10 @@ log = get_logger(component="process-conversation")
 
 
 def merge_transcripts(mic: list[Segment], system: list[Segment]) -> list[dict[str, Any]]:
-    """Deterministic k-way merge on start timestamps (LLD-03 §6.2). Stable
-    tiebreak: mic wins when starts collide. No cross-source de-duplication —
-    diarization (LLD-04) is what collapses overlapping mic/system segments
-    that are actually the same speaker."""
+    """Deterministic k-way merge on start timestamps. Stable tiebreak: mic
+    wins when starts collide. No cross-source de-duplication — diarization
+    is what collapses overlapping mic/system segments that are actually the
+    same speaker."""
     tagged: list[tuple[Segment, str]] = [(s, "mic") for s in mic] + [(s, "system") for s in system]
     tagged.sort(key=lambda st: (st[0].ts_start_ms, 0 if st[1] == "mic" else 1))
     speaker_label = {"mic": "You", "system": "Them"}
@@ -45,10 +47,10 @@ def merge_transcripts(mic: list[Segment], system: list[Segment]) -> list[dict[st
             "ts_end_ms": seg.ts_end_ms,
             "source": source,
             "speaker_label": speaker_label[source],
-            # v1 has no diarization model (LLD-03 §0b) — the label above is
-            # pure source-file attribution, not a Parakeet hint or
-            # diarization output, so neither of LLD-03 §6.2's other
-            # `speaker_label_source` values apply yet.
+            # v1 has no diarization model — the label above is pure
+            # source-file attribution, not a Parakeet hint or diarization
+            # output, so neither of the other `speaker_label_source` values
+            # apply yet.
             "speaker_label_source": "source_file",
             "contact_id": None,
         }
@@ -56,7 +58,32 @@ def merge_transcripts(mic: list[Segment], system: list[Segment]) -> list[dict[st
     ]
 
 
+def _has_audio_frames(path: str) -> bool:
+    """False for a WAV with a header but zero sample frames.
+
+    Real failure seen in the field: a capture backend can fail to deliver a
+    single buffer for an entire recording (see the Core Audio process tap's
+    startup probe) while the writer still produces a well-formed 44-byte WAV
+    header. Handing that to the model is not "transcribe an empty file" —
+    Parakeet's chunking math divides by the frame count and raises
+    `[as_strided] Negative dimensions not allowed`, which used to abort the
+    whole job and discard whatever *did* transcribe successfully from the
+    other stream.
+    """
+    try:
+        with wave.open(path, "rb") as f:
+            return f.getnframes() > 0
+    except (wave.Error, EOFError, OSError):
+        # Same conclusion either way: nothing here worth handing to the
+        # model. Malformed-but-present and empty-but-well-formed both mean
+        # "transcribe nothing from this stream."
+        return False
+
+
 def _default_transcribe_file(path: str, on_progress=None) -> list[Segment]:
+    if not _has_audio_frames(path):
+        log.warning("transcribe_final.empty_audio_stream", path=path)
+        return []
     return ParakeetModel.get().transcribe_file(path, on_progress)
 
 
@@ -88,12 +115,9 @@ def transcribe_final(params: dict[str, Any]) -> dict[str, Any]:
         if not Path(path).exists():
             raise FileNotFoundError(f"transcribe_final: missing source WAV: {path}")
 
-    # DEVIATION from LLD-03 §3.2's request table (which lists only
-    # `{conversation_id, mic_path, system_path}`, no explicit transcript
-    # path): `transcript.json` is a sibling of `mic.wav` in the conversation
-    # blob dir (LLD-01's `conversation_dir` groups all per-conversation
-    # files together), so it's derived here rather than added as a new
-    # request param.
+    # `transcript.json` is a sibling of `mic.wav` in the conversation blob
+    # dir (`conversation_dir` groups all per-conversation files together),
+    # so it's derived here rather than passed in as a request param.
     transcript_path = Path(mic_path).parent / "transcript.json"
 
     # Progress is reported per chunk so the request's deadline tracks
@@ -109,8 +133,8 @@ def transcribe_final(params: dict[str, Any]) -> dict[str, Any]:
 
     turns = merge_transcripts(mic_segments, system_segments)
 
-    # W17c: strip speaker bleed before anything downstream sees the transcript.
-    # On speakers the far side's voice reaches the microphone and gets
+    # Strip speaker bleed before anything downstream sees the transcript.
+    # On some speakers the far side's voice reaches the microphone and gets
     # transcribed a second time as "You" — and this file feeds summary and
     # extraction, so a leaked turn becomes an action item the user never
     # agreed to. Best-effort: a detection failure must never cost the user a

@@ -1,8 +1,7 @@
 """`WindowsCapture` — one thread pumping mic + WASAPI-loopback streams for
-one recording session (LLD-03 §4.2). Spawned by the `start_capture`
-handler, joined by `stop_capture`; never touches the job executor (HLD
-§9.2 — capture is not a queued job, it needs to start/stop synchronously
-from the caller's point of view).
+one recording session. Spawned by the `start_capture` handler, joined by
+`stop_capture`; never touches the job executor — capture is not a queued
+job, it needs to start/stop synchronously from the caller's point of view.
 
 `open_streams` is dependency-injected so this class is unit-testable with
 fake in-memory streams on any OS; the real factory
@@ -26,15 +25,14 @@ from mnemos_worker.capture.wav_writer import ChunkedWavWriter
 LEVEL_INTERVAL_S = 0.1
 CHUNK_INTERVAL_S = 0.5
 READ_FRAMES = 1600  # ~100ms at 16kHz; scaled to the source rate internally
-# TODO(Windows parity audit finding #8): mic and loopback are read
-# sequentially on one thread below, and READ_FRAMES is passed straight to
-# devices running at their native rate (typically 48kHz, not 16kHz), so this
-# is likely closer to ~33ms per read than the "~100ms" the constant's name
-# implies. Both need real Windows hardware to measure and fix correctly —
-# not guessed here.
+# TODO(Windows parity): mic and loopback are read sequentially on one thread
+# below, and READ_FRAMES is passed straight to devices running at their
+# native rate (typically 48kHz, not 16kHz), so this is likely closer to
+# ~33ms per read than the "~100ms" the constant's name implies. Both need
+# real Windows hardware to measure and fix correctly — not guessed here.
 
-# Finding #17: mirrors the mac sidecar's silence-detection threshold/duration
-# exactly (`noSignalDbThreshold`/`noSignalWarningSeconds`,
+# Mirrors the mac sidecar's silence-detection threshold/duration exactly
+# (`noSignalDbThreshold`/`noSignalWarningSeconds`,
 # swift/mnemos-audio/Sources/mnemos-audio/main.swift:24-25) so a muted/
 # wrong-device mic warns identically on both platforms.
 NO_SIGNAL_DB_THRESHOLD = -60.0
@@ -77,13 +75,13 @@ class WindowsCapture:
         self._started_evt = threading.Event()
         self._started_at_ms: int | None = None
         self._thread: threading.Thread | None = None
-        # Finding #7: a failed `_open_streams()` used to still set
-        # `_started_evt` to a "success" state, so `start()` returned
-        # normally and the caller believed recording had begun. This is the
-        # failure signal `_run` sets instead — `start()` re-raises it.
+        # Set by `_run` when `_open_streams()` fails, so `_started_evt` never
+        # signals "success" for a recording that captured nothing —
+        # `start()` re-raises this instead of returning normally. See the
+        # `_run` and `start` methods below for where this is set/consumed.
         self._start_error: Exception | None = None
-        # Finding #17 — running silence duration/warned-once state for the
-        # mic stream, checked every read (see `_track_mic_silence`).
+        # Running silence duration/warned-once state for the mic stream,
+        # checked every read (see `_track_mic_silence`).
         self._mic_silence_start: float | None = None
         self._mic_warned = False
 
@@ -95,8 +93,7 @@ class WindowsCapture:
         if not self._started_evt.wait(timeout=timeout):
             raise TimeoutError("capture thread did not signal start in time")
         if self._start_error is not None:
-            # Finding #7: surface the real failure instead of returning
-            # success for a recording that captured nothing.
+            # See `_start_error`'s definition in `__init__` above.
             raise self._start_error
         assert self._started_at_ms is not None
         return self._started_at_ms
@@ -123,10 +120,9 @@ class WindowsCapture:
         try:
             streams = self._open_streams()
         except OSError as exc:
-            # Finding #7: signal failure through `_started_evt` instead of a
-            # fake success — `start()` re-raises `_start_error`, so
-            # `CaptureManager.start_capture` returns a real JSON-RPC error
-            # rather than reporting a recording that captures nothing.
+            # Sets `_start_error` (see `__init__`) so `start()` re-raises it
+            # and `CaptureManager.start_capture` returns a real JSON-RPC
+            # error rather than reporting a recording that captures nothing.
             self._emit("error", error_kind=classify_wasapi_error(exc), message=str(exc))
             self._start_error = exc
             self._started_evt.set()
@@ -142,15 +138,16 @@ class WindowsCapture:
         last_chunk = 0.0
         try:
             while not self._should_exit.is_set():
-                # Finding #16: always read (and resample) both streams every
-                # iteration, paused or not — this is what actually drains the
-                # WASAPI ring buffer. Only *whether we act on the frames*
-                # depends on pause state, mirroring the mac sidecar's Pause
-                # (taps/streams keep running, buffers are dropped;
+                # Always read (and resample) both streams every iteration,
+                # paused or not — this is what actually drains the WASAPI
+                # ring buffer. Only *whether we act on the frames* depends on
+                # pause state, mirroring the mac sidecar's Pause (taps/streams
+                # keep running, buffers are dropped;
                 # swift/mnemos-audio/Sources/mnemos-audio/main.swift:377,434,
-                # 554-557). Previously this loop stopped reading entirely
-                # while paused, letting the ring buffer overrun so resume
-                # wrote back a burst of stale audio
+                # 554-557). Reading unconditionally here is what keeps the
+                # ring buffer from overrunning while paused — if this loop
+                # ever stopped reading during a pause, resume would write
+                # back a burst of stale audio
                 # (`exception_on_overflow=False`, see `_PyAudioStreamAdapter`
                 # below).
                 mic_pcm = self._read_and_resample(streams.mic)
@@ -209,8 +206,7 @@ class WindowsCapture:
         return resample_to_16k_mono(raw, stream.sample_rate, stream.channels)
 
     def _track_mic_silence(self, mic_db: float) -> None:
-        """Finding #17: no `no_mic_signal` warning existed on Windows at
-        all. Mirrors the mac sidecar's `trackSilence`
+        """Mirrors the mac sidecar's `trackSilence`
         (swift/mnemos-audio/Sources/mnemos-audio/main.swift:488-499) —
         tracks how long the mic has been below `NO_SIGNAL_DB_THRESHOLD` and
         emits a `warning` event (once, until the level recovers) after
@@ -235,10 +231,10 @@ class WindowsCapture:
 
 
 def open_wasapi_streams() -> StreamPair:
-    """Production stream factory (LLD-03 §4.2): regular WASAPI on the
-    default input for mic, WASAPI loopback on the default output device
-    for system audio. Imports `pyaudiowpatch` lazily — this function is
-    only ever called on Windows.
+    """Production stream factory: regular WASAPI on the default input for
+    mic, WASAPI loopback on the default output device for system audio.
+    Imports `pyaudiowpatch` lazily — this function is only ever called on
+    Windows.
     """
     import pyaudiowpatch as pyaudio  # noqa: PLC0415 — intentionally lazy, Windows-only
 

@@ -50,9 +50,8 @@ def test_tick_skips_below_min_audio_threshold(tmp_path):
         transcribe_pcm=lambda pcm, **kw: [Segment(text="x", ts_start_ms=0, ts_end_ms=100)],
     )
     thread._tick()
-    # W17b: the model-readiness signal fires on the very first tick
-    # regardless of audio state; the below-min-audio gate below it is
-    # unaffected.
+    # The model-readiness signal fires on the very first tick regardless of
+    # audio state; the below-min-audio gate below it is unaffected.
     assert events == [("live_transcription_warmup", {"conversation_id": "conv1", "ready": True})]
 
 
@@ -70,7 +69,7 @@ def test_tick_emits_chunk_with_absolute_timestamps(tmp_path):
     )
     thread._tick()
 
-    # W17b: first event is the readiness signal, second is the real chunk.
+    # First event is the readiness signal, second is the real chunk.
     assert len(events) == 2
     assert events[0] == ("live_transcription_warmup", {"conversation_id": "conv1", "ready": True})
     method, params = events[1]
@@ -122,7 +121,7 @@ def test_tick_reports_job_error_on_transcribe_failure(tmp_path):
     )
     thread._tick()
 
-    # W17b: first event is the readiness signal, second is the job error.
+    # First event is the readiness signal, second is the job error.
     assert len(events) == 2
     assert events[0] == ("live_transcription_warmup", {"conversation_id": "conv1", "ready": True})
     method, params = events[1]

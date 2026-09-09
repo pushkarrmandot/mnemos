@@ -9,23 +9,32 @@ from mnemos_worker.extraction_schema import (
 
 def test_missing_summary_markdown_rejected():
     with pytest.raises(SchemaValidationError):
-        validate_extraction_payload({"action_items": []})
+        validate_extraction_payload({"title": "Weekly Sync", "action_items": []})
+
+
+def test_missing_title_rejected():
+    with pytest.raises(SchemaValidationError):
+        validate_extraction_payload({"summary_markdown": "# Overview"})
 
 
 def test_extra_top_level_fields_silently_dropped():
-    out = validate_extraction_payload({"summary_markdown": "# Overview", "unexpected_field": 123})
+    out = validate_extraction_payload(
+        {"title": "Weekly Sync", "summary_markdown": "# Overview", "unexpected_field": 123}
+    )
     assert "unexpected_field" not in out
+    assert out["title"] == "Weekly Sync"
     assert out["summary_markdown"] == "# Overview"
 
 
 def test_bookmarks_optional():
-    out = validate_extraction_payload({"summary_markdown": "# Overview"})
+    out = validate_extraction_payload({"title": "Weekly Sync", "summary_markdown": "# Overview"})
     assert out["bookmarks"] == []
 
 
 def test_empty_lists_valid():
     out = validate_extraction_payload(
         {
+            "title": "Weekly Sync",
             "summary_markdown": "# Overview",
             "action_items": [],
             "decisions": [],
@@ -40,6 +49,7 @@ def test_empty_lists_valid():
 def test_source_timestamp_ms_accepts_null():
     out = validate_extraction_payload(
         {
+            "title": "Weekly Sync",
             "summary_markdown": "# Overview",
             "action_items": [{"text": "Send spec", "source_timestamp_ms": None}],
         }
@@ -55,7 +65,11 @@ def test_non_dict_top_level_rejected():
 def test_action_item_missing_required_text_rejected():
     with pytest.raises(SchemaValidationError):
         validate_extraction_payload(
-            {"summary_markdown": "# Overview", "action_items": [{"assignee_hint": "David"}]}
+            {
+                "title": "Weekly Sync",
+                "summary_markdown": "# Overview",
+                "action_items": [{"assignee_hint": "David"}],
+            }
         )
 
 

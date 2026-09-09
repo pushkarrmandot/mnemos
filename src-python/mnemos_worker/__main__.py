@@ -2,9 +2,9 @@
 
 Handles `handshake`, `health_check`, `shutdown`; capture + live-transcript
 subscribe/unsubscribe on the fast path (never queued behind a job); and job
-kinds registered via `@method` (`ping`, `transcribe_final`). Extraction
-(W11) registers the same way — this loop does not change shape when it
-lands.
+kinds registered via `@method` (`ping`, `transcribe_final`, extraction,
+refresh-memory). Every job kind registers the same way — this loop does not
+change shape as job kinds are added or removed.
 """
 
 from __future__ import annotations
@@ -24,10 +24,11 @@ from mnemos_worker.logging_config import configure, get_logger
 from mnemos_worker.models.transcription import MODEL_METHODS, ParakeetModel
 from mnemos_worker.protocol import FramingError, read_message, write_message
 from mnemos_worker.rpc_client import ReverseRpcClient
+from mnemos_worker.job_progress import configure_progress_notifier
 from mnemos_worker.rpc_client import configure as configure_rpc_client
 
 # Importing registers each handler into DISPATCH_TABLE (§method decorator).
-# Each future job kind (extraction, ...) adds one import here.
+# Adding a new job kind means adding one import here.
 from mnemos_worker.jobs import ping as _ping  # noqa: F401,E402
 from mnemos_worker.jobs import process_conversation as _process_conversation  # noqa: F401,E402
 from mnemos_worker.jobs import extract_memory as _extract_memory  # noqa: F401,E402
@@ -75,18 +76,25 @@ def main(argv: list[str] | None = None) -> int:
     executor = JobExecutor(args.state_dir, on_response=send_response, logger=log)
     executor.start()
 
-    # LLD-05 §4.2/§5.2 — lets a job-executor thread (`extract_memory`,
-    # `refresh_project_memory`) call back into Rust via `run_agent_extraction`
-    # and block for the reply; this read loop resolves that reply below.
+    # Lets a job-executor thread (`extract_memory`, `refresh_project_memory`)
+    # call back into Rust via `run_agent_extraction` and block for the reply;
+    # this read loop resolves that reply below.
     rpc_client = ReverseRpcClient(send)
     configure_rpc_client(rpc_client)
+
+    # Without this, `job_progress.report` silently no-ops (`_notify` stays
+    # None) and long handlers look identical to a wedged worker: the host
+    # sweeps the request at its TTL while the job is still running fine.
+    # That is exactly how a 22-minute recording failed transcription while
+    # the worker went on to finish it successfully.
+    configure_progress_notifier(notify)
 
     heartbeat = Heartbeat(stream_out, write_lock)
     heartbeat.start()
 
-    # Windows-only capture (LLD-03 §4.2): runs on its own dedicated thread,
-    # off the job executor entirely (HLD §9.2), so a slow post-processing
-    # job can never stall Start/Stop Recording. macOS uses the Swift
+    # Windows-only capture: runs on its own dedicated thread, off the job
+    # executor entirely, so a slow post-processing job can never stall
+    # Start/Stop Recording. macOS uses the Swift
     # sidecar instead (`ipc::swift` on the Rust side) — nothing here runs
     # there, but the manager is harmless to construct on any OS since
     # `pyaudiowpatch` is only imported lazily inside the real stream
@@ -96,16 +104,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Parakeet TDT 0.6B loaded once here, off the request path, so the first
     # live-transcription tick or `transcribe_final` call after Start isn't
-    # also paying model-load latency (LLD-03 §7). Best-effort — see
+    # also paying model-load latency. Best-effort — see
     # `ParakeetModel.warm_up`'s docstring on why a load failure doesn't stop
-    # the worker from starting. Backgrounded (W9 2026-08-22): real weight
-    # loading takes far longer than a failed-import warm-up did, and this
-    # call sits before the message loop below — synchronously here, it was
-    # blocking the `handshake` response (and every other RPC) until the
-    # model finished loading, well past callers' handshake timeouts. A
-    # caller that races ahead of warm-up just pays the load latency on its
-    # first real transcribe call instead (`ParakeetModel.get()` blocks on
-    # the same `_executor.submit(...).result()` either way).
+    # the worker from starting. This runs on a background thread, not inline
+    # here, because real weight loading takes far longer than a failed-import
+    # warm-up did, and this call sits before the message loop below —
+    # running it synchronously would block the `handshake` response (and
+    # every other RPC) until the model finished loading, well past callers'
+    # handshake timeouts. A caller that races ahead of warm-up just pays the
+    # load latency on its first real transcribe call instead
+    # (`ParakeetModel.get()` blocks on the same
+    # `_executor.submit(...).result()` either way).
     threading.Thread(
         target=ParakeetModel.warm_up, kwargs={"notify": notify}, name="parakeet-warmup", daemon=True
     ).start()
@@ -129,9 +138,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if method_name is None:
             # No "method" + an "id" is a reply to one of *our* outbound
-            # `run_agent_extraction` calls (LLD-05 §4.2) — the worker never
-            # issues any other kind of forward request, so this is the only
-            # thing an id-but-no-method frame can be.
+            # `run_agent_extraction` calls — the worker never issues any
+            # other kind of forward request, so this is the only thing an
+            # id-but-no-method frame can be.
             if request_id is not None and ("result" in msg or "error" in msg):
                 if not rpc_client.resolve(str(request_id), msg.get("result"), msg.get("error")):
                     log.warning("worker.unmatched_rpc_reply", id=request_id)
@@ -154,13 +163,12 @@ def main(argv: list[str] | None = None) -> int:
         elif method_name == "health_check":
             # Answered directly on the read loop, never queued behind a job —
             # otherwise a busy job would make the worker look "stuck" to
-            # Rust's 500ms budget even though it's fine (BACKEND §2).
+            # Rust's 500ms budget even though it's fine.
             send_response(request_id, {"ok": True}, None)
         elif method_name in CAPTURE_METHODS:
             # Answered directly, same reasoning as health_check above — a
-            # slow post-processing job must never delay Start/Stop
-            # Recording (HLD §9.2). Capture itself runs on its own thread,
-            # not the job executor.
+            # slow post-processing job must never delay Start/Stop Recording.
+            # Capture itself runs on its own thread, not the job executor.
             try:
                 result = CAPTURE_METHODS[method_name](capture, msg.get("params") or {})
                 send_response(request_id, result, None)
@@ -168,8 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                 send_response(request_id, None, {"code": -32000, "message": str(exc)})
         elif method_name in LIVE_TRANSCRIPTION_METHODS:
             # Same fast-path reasoning: subscribe/unsubscribe are Ack-only
-            # (LLD-03 §3.2) and must not queue behind a slow transcribe_final
-            # job — the live thread they start/stop runs independently.
+            # and must not queue behind a slow transcribe_final job — the
+            # live thread they start/stop runs independently.
             try:
                 result = LIVE_TRANSCRIPTION_METHODS[method_name](live_transcription, msg.get("params") or {})
                 send_response(request_id, result, None)

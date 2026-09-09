@@ -1,7 +1,7 @@
-"""Single-active-session coordinator for Windows capture (LLD-03 §3.2).
-Dispatched directly from `__main__`'s read loop — never through the job
-executor (see that module's comment) — so `start_capture`/`stop_capture`
-behave like the synchronous RPCs the LLD describes, not queued jobs.
+"""Single-active-session coordinator for Windows capture. Dispatched
+directly from `__main__`'s read loop — never through the job executor (see
+that module's comment) — so `start_capture`/`stop_capture` behave like
+synchronous RPCs, not queued jobs.
 """
 
 from __future__ import annotations
@@ -45,9 +45,8 @@ class CaptureManager:
 
     def stop_capture(self, params: dict) -> dict:
         # Idempotent — a second call for no/unknown active session is a
-        # no-op returning zero counts, matching LLD-03 §3.2's
-        # `unsubscribe_live_transcript` idempotency note for the analogous
-        # case.
+        # no-op returning zero counts, matching
+        # `unsubscribe_live_transcript`'s idempotency for the analogous case.
         with self._lock:
             capture = self._active
             self._active = None

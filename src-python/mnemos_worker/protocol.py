@@ -1,4 +1,4 @@
-"""LSP-style Content-Length JSON-RPC 2.0 framing (BACKEND_STANDARDS §2).
+"""LSP-style Content-Length JSON-RPC 2.0 framing.
 
 Binary-safe UTF-8 framing over any `BufferedIOBase`-like stream. The reader
 and writer are plain functions, not classes, so `__main__.py` and the tests

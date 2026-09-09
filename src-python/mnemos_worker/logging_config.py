@@ -1,6 +1,5 @@
-"""structlog -> line-delimited JSON on stderr (BACKEND_STANDARDS §2). Never
-stdout — that's the JSON-RPC channel and a stray log line there corrupts
-framing.
+"""structlog -> line-delimited JSON on stderr. Never stdout — that's the
+JSON-RPC channel and a stray log line there corrupts framing.
 """
 
 from __future__ import annotations

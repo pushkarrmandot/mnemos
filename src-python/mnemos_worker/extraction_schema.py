@@ -1,13 +1,12 @@
-"""Validates the agent's extraction JSON against LLD-05 §4.3's schema.
+"""Validates the agent's extraction JSON against the extraction schema.
 
-No `pydantic` dependency exists in `src-python/pyproject.toml` yet (checked
-before writing this — the worker skeleton only ships `structlog`/`numpy`),
-and adding one just for two small schemas wasn't worth a new dependency this
-wave. Plain functions instead: `validate_extraction_payload` /
-`validate_refresh_payload` raise `SchemaValidationError` with a message
-suitable for LLD-05 §4.5's "reformat as strict JSON" retry nudge, or return a
-normalized dict (unknown top-level fields dropped, missing optional lists
-defaulted to `[]`) on success.
+No `pydantic` dependency exists in `src-python/pyproject.toml` (the worker
+skeleton only ships `structlog`/`numpy`), and adding one just for two small
+schemas isn't worth a new dependency. Plain functions instead:
+`validate_extraction_payload` / `validate_refresh_payload` raise
+`SchemaValidationError` with a message suitable for a "reformat as strict
+JSON" retry nudge, or return a normalized dict (unknown top-level fields
+dropped, missing optional lists defaulted to `[]`) on success.
 """
 
 from __future__ import annotations
@@ -51,6 +50,17 @@ def _optional_int(obj: dict[str, Any], field: str) -> int | None:
     return value
 
 
+def _optional_bool(obj: dict[str, Any], field: str) -> bool:
+    """Defaults to `False` rather than raising on a missing/null value — a
+    model that forgets this one flag shouldn't fail the whole extraction."""
+    value = obj.get(field)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise SchemaValidationError(f"{field} must be a boolean")
+    return value
+
+
 def _list_of(obj: dict[str, Any], field: str, where: str) -> list[dict[str, Any]]:
     value = obj.get(field, [])
     if value is None:
@@ -64,10 +74,12 @@ def _list_of(obj: dict[str, Any], field: str, where: str) -> list[dict[str, Any]
 
 
 def validate_extraction_payload(data: Any) -> dict[str, Any]:
-    """LLD-05 §4.3. Raises `SchemaValidationError` on any violation."""
+    """Validates the per-conversation extraction schema. Raises
+    `SchemaValidationError` on any violation."""
     if not isinstance(data, dict):
         raise SchemaValidationError("top-level response must be a JSON object")
 
+    title = _require_str(data, "title", "extraction")
     summary_markdown = _require_str(data, "summary_markdown", "extraction")
 
     action_items = []
@@ -76,6 +88,7 @@ def validate_extraction_payload(data: Any) -> dict[str, Any]:
             {
                 "text": _require_str(item, "text", "action_items[]"),
                 "assignee_hint": _optional_str(item, "assignee_hint"),
+                "assignee_is_self": _optional_bool(item, "assignee_is_self"),
                 "assignee_contact_id": _optional_str(item, "assignee_contact_id"),
                 "due_hint": _optional_str(item, "due_hint"),
                 "source_timestamp_ms": _optional_int(item, "source_timestamp_ms"),
@@ -88,6 +101,7 @@ def validate_extraction_payload(data: Any) -> dict[str, Any]:
             {
                 "statement": _require_str(item, "statement", "decisions[]"),
                 "decided_by_hint": _optional_str(item, "decided_by_hint"),
+                "decided_by_is_self": _optional_bool(item, "decided_by_is_self"),
                 "quote": _optional_str(item, "quote"),
                 "source_timestamp_ms": _optional_int(item, "source_timestamp_ms"),
             }
@@ -99,6 +113,7 @@ def validate_extraction_payload(data: Any) -> dict[str, Any]:
             {
                 "question": _require_str(item, "question", "open_questions[]"),
                 "raised_by_hint": _optional_str(item, "raised_by_hint"),
+                "raised_by_is_self": _optional_bool(item, "raised_by_is_self"),
                 "source_timestamp_ms": _optional_int(item, "source_timestamp_ms"),
             }
         )
@@ -113,6 +128,7 @@ def validate_extraction_payload(data: Any) -> dict[str, Any]:
         )
 
     return {
+        "title": title,
         "summary_markdown": summary_markdown,
         "action_items": action_items,
         "decisions": decisions,
@@ -122,8 +138,9 @@ def validate_extraction_payload(data: Any) -> dict[str, Any]:
 
 
 def validate_refresh_payload(data: Any) -> dict[str, Any]:
-    """LLD-05 §5.3. The agent returns only these three fields —
-    `last_refresh_at`/`last_refresh_runner` are stamped by the caller."""
+    """Validates the project-memory refresh schema. The agent returns only
+    these three fields — `last_refresh_at`/`last_refresh_runner` are stamped
+    by the caller."""
     if not isinstance(data, dict):
         raise SchemaValidationError("top-level response must be a JSON object")
 

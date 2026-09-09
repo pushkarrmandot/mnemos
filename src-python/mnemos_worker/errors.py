@@ -1,11 +1,11 @@
 """`WorkerJobError` lets a job handler pick its own JSON-RPC error code
 instead of `job_executor.py`'s generic `-32000` catch-all, so the Rust side's
-`map_json_rpc_error` (LLD-02 §4.4) can classify the failure instead of every
-job error looking like an opaque `Internal`. Codes reused here are ones
+`map_json_rpc_error` can classify the failure instead of every job error
+looking like an opaque `Internal`. Codes reused here are ones
 `map_json_rpc_error` already understands (`-32001` WorkerUnavailable,
-`-32010` Validation, `-32020` Cancelled) plus `-32022`, added this wave for
-"the agent's JSON still fails schema validation after one retry" (LLD-05
-§4.5) -> `AppError::Runner`.
+`-32010` Validation, `-32020` Cancelled) plus `-32022`, which maps to
+`AppError::Runner` for "the agent's JSON still fails schema validation after
+one retry".
 """
 
 from __future__ import annotations

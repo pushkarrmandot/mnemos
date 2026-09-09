@@ -24,7 +24,7 @@ def test_header_is_valid_even_without_close_crash_simulation(tmp_path):
     writer.append(b"\x02\x00" * 100)
     writer.flush()
     # Simulate a crash: never call close(). The header on disk must still
-    # declare the real data size (LLD-03 §4.1's crash-safety property).
+    # declare the real data size (the writer's crash-safety property).
     with wave.open(str(path), "rb") as w:
         assert w.getnframes() == 100
 

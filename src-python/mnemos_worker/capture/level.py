@@ -1,5 +1,5 @@
-"""RMS-in-dBFS level metering over a 16-bit PCM buffer (LLD-03 §4.2:
-"Level events are RMS over the last ~100ms window converted to dBFS")."""
+"""RMS-in-dBFS level metering over a 16-bit PCM buffer ("Level events are
+RMS over the last ~100ms window converted to dBFS")."""
 
 from __future__ import annotations
 

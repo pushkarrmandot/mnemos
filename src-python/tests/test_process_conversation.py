@@ -1,10 +1,23 @@
 import json
+import wave
 
 import pytest
 
 from mnemos_worker.jobs import process_conversation
 from mnemos_worker.jobs.process_conversation import merge_transcripts, transcribe_final
 from mnemos_worker.models.transcription import Segment
+
+
+def _write_wav(path, frames: int) -> None:
+    """A real, well-formed WAV — matches what a capture backend that
+    delivered zero buffers actually writes on disk (header, no samples),
+    not an arbitrary invalid file."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        if frames:
+            w.writeframes(b"\x00\x00" * frames)
 
 
 def test_merge_transcripts_orders_by_start_ts_mic_wins_ties():
@@ -80,3 +93,83 @@ def test_transcribe_final_raises_if_source_wav_missing(tmp_path):
                 "system_path": str(missing_system),
             }
         )
+
+
+def test_has_audio_frames_true_for_real_audio(tmp_path):
+    path = tmp_path / "mic.wav"
+    _write_wav(path, frames=1000)
+    assert process_conversation._has_audio_frames(str(path)) is True
+
+
+def test_has_audio_frames_false_for_header_only_wav(tmp_path):
+    """The exact shape of the bug: a capture backend that delivered zero
+    buffers for a whole recording still writes a well-formed WAV header, so
+    the file exists and opens fine — it just has no frames."""
+    path = tmp_path / "system.wav"
+    _write_wav(path, frames=0)
+    assert process_conversation._has_audio_frames(str(path)) is False
+
+
+def test_has_audio_frames_false_for_unparseable_file(tmp_path):
+    path = tmp_path / "system.wav"
+    path.write_bytes(b"not a wav")
+    assert process_conversation._has_audio_frames(str(path)) is False
+
+
+def test_default_transcribe_file_skips_the_model_for_empty_audio(tmp_path, monkeypatch):
+    path = tmp_path / "system.wav"
+    _write_wav(path, frames=0)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("the model must not be invoked on an empty stream")
+
+    monkeypatch.setattr(
+        process_conversation.ParakeetModel, "get", staticmethod(lambda: type(
+            "M", (), {"transcribe_file": fail_if_called}
+        )())
+    )
+
+    assert process_conversation._default_transcribe_file(str(path)) == []
+
+
+def test_transcribe_final_survives_one_empty_stream(tmp_path, monkeypatch):
+    """Reproduces a real production failure: a ~1-minute recording where the
+    system-audio backend delivered zero buffers (see the Core Audio process
+    tap's startup probe) produced a well-formed, zero-frame `system.wav`
+    alongside a normal `mic.wav`. Before this fix, handing the empty file to
+    Parakeet raised `[as_strided] Negative dimensions not allowed`, which
+    aborted the whole job — discarding the mic transcript too, even though
+    it had transcribed correctly — and left the user stuck on a permanent
+    "storage error" retry loop because `transcript.json` was never written.
+
+    One empty stream must degrade to "half the transcript," never to
+    "no transcript."
+    """
+    mic_path = tmp_path / "mic.wav"
+    system_path = tmp_path / "system.wav"
+    _write_wav(mic_path, frames=16000 * 41)  # ~41s, matching the field case
+    _write_wav(system_path, frames=0)
+
+    def fake_transcribe_file(path: str, on_progress=None):
+        if path == str(system_path):
+            raise AssertionError("must not reach the model for an empty stream")
+        if on_progress is not None:
+            on_progress(1, 1)
+        return [Segment(text="hi there", ts_start_ms=0, ts_end_ms=1000)]
+
+    monkeypatch.setattr(process_conversation, "_default_transcribe_file", lambda path, on_progress=None: (
+        [] if path == str(system_path) else fake_transcribe_file(path, on_progress)
+    ))
+
+    result = transcribe_final(
+        {
+            "conversation_id": "conv-1",
+            "mic_path": str(mic_path),
+            "system_path": str(system_path),
+        }
+    )
+
+    assert result["segment_count"] == 1
+    on_disk = json.loads((tmp_path / "transcript.json").read_text())
+    assert [t["text"] for t in on_disk["turns"]] == ["hi there"]
+    assert on_disk["turns"][0]["source"] == "mic"

@@ -1,7 +1,7 @@
 """Mono 16-bit PCM WAV writer that flushes on a fixed cadence and keeps the
-RIFF/data chunk sizes patched after every flush (LLD-03 §4.1's mac sidecar
-does the identical trick) — so a file killed mid-recording is still a
-valid, playable WAV instead of one whose header claims zero frames.
+RIFF/data chunk sizes patched after every flush (the mac sidecar does the
+identical trick) — so a file killed mid-recording is still a valid, playable
+WAV instead of one whose header claims zero frames.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ class ChunkedWavWriter:
         self._closed = False
         # `FILE_SHARE_READ | FILE_SHARE_WRITE` equivalent on Windows is the
         # platform default for a plain open() — no AV-lock retry needed
-        # here; retry-on-PermissionError lives in the caller (failure mode
-        # #8, LLD-03 §9), not in the writer itself.
+        # here; retry-on-PermissionError lives in the caller, not in the
+        # writer itself.
         self._fh = open(path, "wb")
         self._fh.write(self._header(0))
         self._fh.flush()

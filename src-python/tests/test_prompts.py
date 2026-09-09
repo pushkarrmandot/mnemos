@@ -1,11 +1,11 @@
-"""W18 — the user's own identity reaching the two prompts.
+"""The user's own identity reaching the two prompts.
 
-Until this wave `contacts` was hardcoded to `[]` on the Rust side, so the
-model was asked to attribute action items without being told who the user
-was. These tests pin the part that is easy to regress silently: the *self*
-contact has to arrive as a stated instruction, not as one key inside a dict
-repr the model may or may not read. A prompt that still renders is not a
-prompt that still works, so the assertions are about the words, not the shape.
+The model needs to know who the user is in order to attribute action items
+correctly, so the *self* contact must arrive in the prompt as a stated
+instruction, not as one key inside a dict repr the model may or may not
+read — that is the part these tests pin, since it's easy to regress
+silently. A prompt that still renders is not a prompt that still works, so
+the assertions are about the words, not the shape.
 """
 
 from mnemos_worker.prompts import (

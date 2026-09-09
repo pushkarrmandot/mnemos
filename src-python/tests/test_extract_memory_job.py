@@ -20,6 +20,7 @@ def test_extraction_happy_path(monkeypatch):
         assert method == "run_agent_extraction"
         assert "prompt" in params and "system_prompt" in params
         return {
+            "title": "Auth Spec Handoff",
             "summary_markdown": "# Overview\nShipping the auth spec.",
             "action_items": [{"text": "Send David the auth spec", "assignee_hint": "David"}],
             "decisions": [],

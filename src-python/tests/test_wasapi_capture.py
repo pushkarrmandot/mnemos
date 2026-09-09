@@ -95,7 +95,7 @@ def test_pause_resume_emit_events_and_stop_streams_writing(tmp_path):
 
 
 def test_stream_open_failure_raises_from_start_not_a_silent_success(tmp_path):
-    # Finding #7: a failed stream open must surface as a real `start()`
+    # A failed stream open must surface as a real `start()`
     # failure (not hang, but also not a silent success) — the caller
     # (`CaptureManager.start_capture`) turns this into a JSON-RPC error
     # instead of reporting a recording that captures nothing.
@@ -121,7 +121,7 @@ def test_stream_open_failure_raises_from_start_not_a_silent_success(tmp_path):
 
 
 def test_pause_keeps_reading_but_stops_writing_and_leveling(tmp_path):
-    # Finding #16: Pause must keep draining the stream (so the WASAPI ring
+    # Pause must keep draining the stream (so the WASAPI ring
     # buffer never overruns) but must not write frames to the WAV files or
     # emit level/silence events while paused — mirrors the mac sidecar's
     # "keep taps running, drop buffers" semantic.
@@ -155,7 +155,7 @@ def test_pause_keeps_reading_but_stops_writing_and_leveling(tmp_path):
 
 
 def test_mic_silence_warning_fires_after_threshold_and_clears_on_signal():
-    # Finding #17 — unit-level check of `_track_mic_silence` directly
+    # Unit-level check of `_track_mic_silence` directly
     # (avoids a real `NO_SIGNAL_WARNING_SECONDS`-long sleep in the test
     # suite): silence below threshold for the configured duration emits
     # exactly one `no_mic_signal` warning, and audible signal clears the

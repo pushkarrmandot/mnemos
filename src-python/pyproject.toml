@@ -3,10 +3,26 @@ name = "mnemos-worker"
 version = "0.1.0"
 description = "Mnemos persistent worker (W5 skeleton — no model/job handlers yet)"
 requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
 dependencies = [
     "structlog>=24.1",
     "numpy>=1.26",
     "pyaudiowpatch>=0.2.12.7; sys_platform == 'win32'",
+    # Windows transcription backend (see `_ParakeetOnnxBackend` in
+    # models/transcription.py) — `[cpu]` for onnxruntime, `[hub]` for the
+    # huggingface_hub-based model download `_report_download_progress`
+    # hooks into.
+    "onnx-asr[cpu,hub]>=0.12.0; sys_platform == 'win32'",
+    # macOS transcription backend (see `_ParakeetMlxBackend` in
+    # models/transcription.py) — pulls in `mlx` itself as its own
+    # transitive dependency. Previously installed manually outside `uv
+    # sync` on dev machines (verified via `pip3 show parakeet-mlx` against
+    # a real install: name/version confirmed as `parakeet-mlx==0.5.2`,
+    # not a guess) — undeclared here meant a bundled macOS build per
+    # PACKAGING_DESIGN.md section A would have shipped without it and
+    # macOS transcription would have silently failed the same way Windows
+    # transcription failed before `_ParakeetOnnxBackend` existed.
+    "parakeet-mlx>=0.5.2; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

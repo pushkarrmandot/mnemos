@@ -1,6 +1,5 @@
-"""Atomic writes for `pending_jobs.json` / `current_job.json` (HLD §9.1,
-LLD-02 §6 — the worker owns these writes; Rust only reads + replays them on
-restart).
+"""Atomic writes for `pending_jobs.json` / `current_job.json` — the worker
+owns these writes; Rust only reads + replays them on restart.
 """
 
 from __future__ import annotations

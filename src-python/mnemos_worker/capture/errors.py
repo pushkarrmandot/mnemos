@@ -1,7 +1,6 @@
-"""Maps WASAPI failures to the shared `SidecarErrorKind` vocabulary
-(LLD-03 §4.2's `classify_wasapi_error`) so the cross-platform
-`capture_event{kind:"error", error_kind:...}` shape never leaks a raw
-Windows HRESULT to Rust.
+"""Maps WASAPI failures to the shared `SidecarErrorKind` vocabulary so the
+cross-platform `capture_event{kind:"error", error_kind:...}` shape never
+leaks a raw Windows HRESULT to Rust.
 """
 
 from __future__ import annotations

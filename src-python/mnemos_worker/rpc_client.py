@@ -1,16 +1,16 @@
-"""Reverse-RPC caller (LLD-02 §7, LLD-05 §4.2/§5.2): lets a job-executor
-thread call back into Rust (`run_agent_extraction`) and block for the reply,
-while the main stdin-read loop keeps servicing everything else on the same
-stdio transport.
+"""Reverse-RPC caller: lets a job-executor thread call back into Rust
+(`run_agent_extraction`) and block for the reply, while the main stdin-read
+loop keeps servicing everything else on the same stdio transport.
 
-This is genuinely new plumbing, not previously built: earlier waves only
-built the *inbound* direction (Rust/`__main__.py` answering worker-served
-requests). W11's `extract_memory`/`refresh_project_memory` job handlers are
-the first callers that need the worker to *initiate* a request, so this
-module + the two-line hook in `__main__.py`'s read loop is what makes that
-possible. IDs are `rpc-<n>` strings — a disjoint namespace from Rust's own
-outbound-request ids (plain integers), so no collision is possible on either
-side.
+This module handles the *outbound* direction — the worker initiating a
+request into Rust — which is distinct from the *inbound* direction
+(Rust/`__main__.py` answering worker-served requests) that the main read
+loop already handles directly. The `extract_memory`/`refresh_project_memory`
+job handlers are the callers that need the worker to initiate a request, so
+this module plus the two-line hook in `__main__.py`'s read loop is what makes
+that possible. IDs are `rpc-<n>` strings — a disjoint namespace from Rust's
+own outbound-request ids (plain integers), so no collision is possible on
+either side.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class ReverseRpcClient:
         return True
 
 
-# Process-wide default client (LLD-05 §4.2/§5.2's `ctx.reverse_rpc`). A real
+# Process-wide default client (this module's equivalent of `ctx.reverse_rpc`). A real
 # `JobCtx` plumbed through every `@method` handler's signature would be the
 # textbook shape, but every existing job handler (`ping`, `transcribe_final`)
 # takes a plain `dict[str, Any] -> dict[str, Any]` — changing that signature

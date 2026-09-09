@@ -1,22 +1,20 @@
-"""Project-memory refresh (LLD-05 §5). One `run_agent_extraction` turn (plus
-at most one schema-retry turn) that asks the agent to *modify* the current
-`project_memory.json` document, then computes the §5.4 diff guardrail here
+"""Project-memory refresh. One `run_agent_extraction` turn (plus at most one
+schema-retry turn) that asks the agent to *modify* the current
+`project_memory.json` document, then computes the diff guardrail here
 (Python owns `difflib.SequenceMatcher` — no Rust-side equivalent was worth
 adding for one bool).
 
-Deviation from the LLD's read side: `prior_decisions`/`prior_open_questions`
-(§5.2) are NOT threaded into this prompt in v1 — passing them requires a
-project-scoped list method on `StorageService` (`list_project_decisions`/
-`list_project_open_questions`) that doesn't exist yet (LLD-05 §10 already
-flags related gaps as HLD gaps for a reason). Supersession detection has
-less context this wave as a result; the refresh pipeline, the modify-not-
-rewrite contract, and the diff guardrail are otherwise built to spec. See
-LLD-05's "Implementation status" for the full deviation writeup.
+Known gap: `prior_decisions`/`prior_open_questions` are NOT threaded into
+this prompt in v1 — passing them requires a project-scoped list method on
+`StorageService` (`list_project_decisions`/`list_project_open_questions`)
+that doesn't exist yet. Supersession detection has less context as a
+result; the refresh pipeline, the modify-not-rewrite contract, and the diff
+guardrail are otherwise built to spec.
 
 Same file-path-agnostic design as `extract_memory.py`: the caller (Rust —
 `memory::refresh_project`) reads `project_memory.json`/`extraction.json`
 files and passes their contents as data, and owns the snapshot-before-
-overwrite + prune-history + final atomic write (LLD-05 §5.5).
+overwrite + prune-history + final atomic write.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
-"""Prompt text for the two `run_agent_extraction` callers (LLD-05 §6). Plain
-f-strings, not a Jinja2 template file — `src-python/pyproject.toml` has no
-templating dependency and neither prompt needs more than string
-interpolation + a loop, so pulling in `jinja2` for `extract.md.j2`/
-`refresh_memory.md.j2` as LLD-05 §6 sketches wasn't worth it. LLD-05 itself
-says it specifies the *contract*, not the exact wording — this module is the
-"coding agent tunes it" implementation of that contract.
+"""Prompt text for the two `run_agent_extraction` callers. Plain f-strings,
+not a Jinja2 template file — `src-python/pyproject.toml` has no templating
+dependency and neither prompt needs more than string interpolation + a
+loop, so pulling in `jinja2` for `extract.md.j2`/`refresh_memory.md.j2`
+wasn't worth it. The design spec deliberately specifies the *contract* for
+these prompts, not the exact wording — this module is the "coding agent
+tunes it" implementation of that contract.
 """
 
 from __future__ import annotations
@@ -18,25 +18,45 @@ Output ONLY a single JSON object — no prose, no markdown code fences, no \
 explanation before or after it. The object must have exactly these keys:
 
 {
+  "title": "Q3 Budget Review",
   "summary_markdown": "# Overview\\n...\\n## Discussion\\n...\\n## Decisions\\n...\\n## Follow-ups\\n...\\n## Concerns\\n...",
-  "action_items": [{"text": str, "assignee_hint": str|null, "due_hint": str|null, "source_timestamp_ms": int|null}],
-  "decisions": [{"statement": str, "decided_by_hint": str|null, "quote": str|null, "source_timestamp_ms": int|null}],
-  "open_questions": [{"question": str, "raised_by_hint": str|null, "source_timestamp_ms": int|null}],
+  "action_items": [{"text": str, "assignee_hint": str|null, "assignee_is_self": bool, "due_hint": str|null, "source_timestamp_ms": int|null}],
+  "decisions": [{"statement": str, "decided_by_hint": str|null, "decided_by_is_self": bool, "quote": str|null, "source_timestamp_ms": int|null}],
+  "open_questions": [{"question": str, "raised_by_hint": str|null, "raised_by_is_self": bool, "source_timestamp_ms": int|null}],
   "bookmarks": []
 }
+
+`title` is what this meeting is called in a list of dozens of others — write \
+it like a calendar event title, not a headline. 3 to 7 words. Name the actual \
+subject or decision at hand ("Renewal Pricing for Acme", "Sprint 14 Retro", \
+"Hiring Plan for Design Team") — never a generic label like "Meeting", \
+"Call", "Sync", or "Discussion" on its own, and never the literal names of \
+the speakers with no topic ("Call with Priya" tells the user nothing "Priya" \
+didn't already). Do not restate the date or "meeting"/"call" as a word — \
+the app shows those separately. No trailing period, no quotation marks \
+around it. If the transcript is too short or off-topic to name a real \
+subject, a short honest label ("Quick Check-in") beats a padded or invented \
+one.
 
 Speaker labels in the transcript are channel labels, not people: "You" is \
 the microphone (the user) and "Them" is everything the computer played \
 (everyone else on the call, however many that is).
 
-Filling in `assignee_hint`, `decided_by_hint`, and `raised_by_hint`:
-- Use "You" when the person is the user. The known contacts list marks the \
-user with `is_self: true` and gives their name — so if someone in the \
-transcript addresses them by that name ("Priya, can you send that over"), \
-the item is theirs and the hint is "You", even though the words came from \
-the "Them" channel.
-- Use a person's actual name when the transcript makes it clear who is meant.
-- Use null when you cannot tell. Never write "Them" — it means "one of the \
+Filling in `assignee_hint`, `decided_by_hint`, and `raised_by_hint`, and \
+their matching `assignee_is_self` / `decided_by_is_self` / \
+`raised_by_is_self` booleans:
+- These hint fields always hold a real person's name (or null) — never a \
+pronoun like "You". When the person is the user, write their actual name \
+(from the known contacts list, which marks them with `is_self: true`) like \
+you would anyone else's, and separately set the matching `*_is_self` field \
+to true. This applies even when someone in the transcript addresses them by \
+name ("Priya, can you send that over") — the item is theirs, hint is her \
+name, `*_is_self` is true, even though the words came from the "Them" \
+channel.
+- For anyone who is not the user, use their actual name and leave the \
+matching `*_is_self` field false.
+- Use null (and `*_is_self: false`) when you cannot tell. Never write \
+"Them" — it means "one of the \
 other people, unknown", which is the same as not knowing, and it renders as \
 a label that looks like information and carries none. Guessing is worse than \
 null here: an unassigned item reads as needing an owner, while a wrongly \
@@ -139,7 +159,9 @@ def _render_contacts(contacts: list[dict[str, Any]]) -> str:
         name = contact.get("display_name") or contact.get("first_name") or "?"
         if contact.get("is_self"):
             lines.append(
-                f'- {name} — THIS IS THE USER. Attribute their items to "You".'
+                f"- {name} — THIS IS THE USER. Attribute their items to them by "
+                f'name, like anyone else, and set the matching "_is_self" field '
+                f"to true."
             )
         else:
             lines.append(f"- {name}")

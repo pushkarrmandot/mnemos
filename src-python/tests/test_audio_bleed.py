@@ -1,4 +1,4 @@
-"""W17c speaker-bleed detection (`mnemos_worker.audio_bleed`).
+"""Speaker-bleed detection (`mnemos_worker.audio_bleed`).
 
 Signals are synthesized rather than loaded from fixtures: leakage is defined
 by its *relationship* between two channels (attenuated, delayed, correlated),
