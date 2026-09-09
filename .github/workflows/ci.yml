@@ -56,6 +56,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      # Tauri's build script resolves the sidecars and the bundled Python
+      # interpreter from disk before compiling a line of Rust, and both are
+      # gitignored — they are built per machine and the interpreter alone is
+      # ~500MB (see .gitignore, PACKAGING_DESIGN.md section A). A fresh
+      # checkout therefore dies with `resource path
+      # binaries/mnemos-audio-... doesn't exist` before clippy or the tests
+      # ever run, which is why every Rust job here had never once passed.
+      #
+      # These jobs lint and test; they never bundle a shippable app. Empty
+      # files at the paths the build script probes satisfy it and are never
+      # executed. Anything that actually needs working sidecars — a real
+      # build, a release — must produce them properly instead
+      # (scripts/build_macos_app.sh).
+      - name: Stub gitignored sidecars and interpreter
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            mkdir -p src-tauri/binaries src-tauri/bundled/python-macos-arm64
+            # `externalBin` entries are resolved with the target triple
+            # appended; macos-14 runners are arm64.
+            for b in mnemos-audio mnemos-meeting-watcher; do
+              : > "src-tauri/binaries/$b-aarch64-apple-darwin"
+              chmod +x "src-tauri/binaries/$b-aarch64-apple-darwin"
+            done
+            : > src-tauri/bundled/python-macos-arm64/.ci-placeholder
+          else
+            mkdir -p src-tauri/bundled/python-windows-x64
+            : > src-tauri/bundled/python-windows-x64/.ci-placeholder
+          fi
+
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -91,6 +123,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # Tauri's build script resolves the sidecars and the bundled Python
+      # interpreter from disk before compiling a line of Rust, and both are
+      # gitignored — they are built per machine and the interpreter alone is
+      # ~500MB (see .gitignore, PACKAGING_DESIGN.md section A). A fresh
+      # checkout therefore dies with `resource path
+      # binaries/mnemos-audio-... doesn't exist` before clippy or the tests
+      # ever run, which is why every Rust job here had never once passed.
+      #
+      # These jobs lint and test; they never bundle a shippable app. Empty
+      # files at the paths the build script probes satisfy it and are never
+      # executed. Anything that actually needs working sidecars — a real
+      # build, a release — must produce them properly instead
+      # (scripts/build_macos_app.sh).
+      - name: Stub gitignored sidecars and interpreter
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            mkdir -p src-tauri/binaries src-tauri/bundled/python-macos-arm64
+            # `externalBin` entries are resolved with the target triple
+            # appended; macos-14 runners are arm64.
+            for b in mnemos-audio mnemos-meeting-watcher; do
+              : > "src-tauri/binaries/$b-aarch64-apple-darwin"
+              chmod +x "src-tauri/binaries/$b-aarch64-apple-darwin"
+            done
+            : > src-tauri/bundled/python-macos-arm64/.ci-placeholder
+          else
+            mkdir -p src-tauri/bundled/python-windows-x64
+            : > src-tauri/bundled/python-windows-x64/.ci-placeholder
+          fi
+
       # Regenerates bindings/tauri.ts; a diff means someone hand-edited the
       # file or forgot to commit a regen (FRONTEND §3).
       - run: cargo test specta_bindings
