@@ -37,6 +37,19 @@
   --accent-primary-bg: #fbf1e6;
   --accent-primary-text: #7a4517;
 
+  /* ── Brand mark — the four stops each strand of the M is drawn with.
+        Bronze on light, cream on dark: the mark inverts with the theme so it
+        never carries its own tile inside the product. The packaged app icon
+        (public/mnemos-mark.svg) is fixed copper and does not use these. ── */
+  --mark-front-1: #9a5222;
+  --mark-front-2: #c87a3f;
+  --mark-front-3: #d98e52;
+  --mark-front-4: #a65a26;
+  --mark-back-1: #77380f;
+  --mark-back-2: #9b5220;
+  --mark-back-3: #8b4718;
+  --mark-back-4: #6b310c;
+
   /* ── Signal colors — muted, single-meaning, never decorative ───────────── */
   --success: #5f8c5f;
   --success-bg: #e9f1e7;
@@ -112,10 +125,11 @@
   --space-reading-6: 48px;
 
   /* ── Shell geometry (SHELL_CHEATSHEET.md §2, DESIGN_SYSTEM.md §7) ──────── */
+  /* Not read at runtime by either — both LeftNav and the chat rail are
+     drag-resizable (LeftNav.tsx / RightRail.tsx) and remember the user's own
+     width via useUIStore's `navWidth`/`railWidth`, which start from these
+     same numbers (kept in sync by eye, not read from here). */
   --nav-width: 208px;
-  /* Default/reset width only — the rail is drag-resizable (RightRail.tsx),
-     and remembers the user's own width via useUIStore's `railWidth`, which
-     starts from this same 380 (kept in sync by eye, not read at runtime). */
   --rail-width: 380px;
 }
 
@@ -138,6 +152,15 @@
   --accent-primary-hover: #f0b876;
   --accent-primary-bg: #38281a;
   --accent-primary-text: #f5c68a;
+
+  --mark-front-1: #ebdbc0;
+  --mark-front-2: #fbf3e4;
+  --mark-front-3: #fffaf0;
+  --mark-front-4: #e4d0af;
+  --mark-back-1: #cbb08a;
+  --mark-back-2: #e7d6b8;
+  --mark-back-3: #dcc7a4;
+  --mark-back-4: #bc9e77;
 
   --success: #78a97a;
   --success-bg: #1e2a1e;

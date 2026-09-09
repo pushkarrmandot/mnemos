@@ -15,7 +15,7 @@ import { qk } from "@/queries/keys";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * Real "+New Project" (⌘N, and the left-nav row) — replaces the W6 stub
+ * Real "+New Project" (⌘N, and the left-nav row) — replaces the earlier stub
  * toast. Name-only in v1 (no description field in the UI yet, though the
  * model has one). Creates via `StorageService::create_project`, invalidates
  * the left nav's project list, and navigates straight to the new project.
@@ -99,7 +99,7 @@ export function NewProjectModal() {
 
   return (
     <Modal
-      // SHELL_CHEATSHEET.md §5 — focus lands in the first input, not the close
+      // Focus lands in the first input, not the close
       // affordance. Radix would otherwise focus the content wrapper.
       contentProps={{
         onOpenAutoFocus: (event) => {

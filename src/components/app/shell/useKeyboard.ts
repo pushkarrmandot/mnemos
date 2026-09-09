@@ -5,10 +5,10 @@ import { useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * The single keyboard registry (SHELL_CHEATSHEET.md §6), mounted once at
+ * The single keyboard registry, mounted once at
  * `<AppShell>` scope so bindings survive route changes.
  *
- * `react-hotkeys-hook` — PROVISIONAL per §6, kept: its `mod` token already
+ * `react-hotkeys-hook` — PROVISIONAL, kept: its `mod` token already
  * normalizes Meta↔Control per platform, which is the one thing a hand-rolled
  * matcher gets wrong. Suppression inside `input, textarea, [contenteditable]`
  * is its default; the rows that stay live opt back in explicitly.

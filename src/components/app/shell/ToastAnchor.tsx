@@ -3,10 +3,9 @@ import { t } from "@/lib/i18n";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * Top-right mount point for the toast stack (SHELL_CHEATSHEET.md §2, §4;
- * DESIGN_SYSTEM.md §13 #7).
+ * Top-right mount point for the toast stack.
  *
- * The renderer caps the display at three (LLD-10 §3.1) — older toasts stay in
+ * The renderer caps the display at three — older toasts stay in
  * the store so the live region can re-announce them, they just don't stack up
  * the screen. Newest sits at the bottom, nearest the eye's last position.
  */

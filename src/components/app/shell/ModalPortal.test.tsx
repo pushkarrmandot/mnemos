@@ -5,7 +5,7 @@ import { ModalPortal } from "@/components/app/shell/ModalPortal";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * SHELL_CHEATSHEET.md §5 + §9's modal row: focus lands in the first input, Esc
+ * Modal row behavior: focus lands in the first input, Esc
  * closes, and an overlay click on a dirty form asks before discarding.
  */
 /**

@@ -8,19 +8,21 @@ import { RightRail } from "@/components/app/shell/RightRail";
 import { ToastAnchor } from "@/components/app/shell/ToastAnchor";
 import { TopBar } from "@/components/app/shell/TopBar";
 import { useKeyboard } from "@/components/app/shell/useKeyboard";
+import { UpdateAvailableBanner } from "@/components/app/UpdateAvailableBanner";
 import { useRecordingTick } from "@/features/active-conversation/RecordingTimer";
 import { useCrashRecoveryCheck } from "@/features/active-conversation/useCrashRecoveryCheck";
 import { useStuckProcessingCheck } from "@/features/conversation-detail/useStuckProcessingCheck";
 import { useRecordingStore } from "@/stores/recording";
 import { useLiveTranscriptChannel } from "@/subscriptions/useLiveTranscriptChannel";
+import { useTrayCommandChannel } from "@/subscriptions/useTrayCommandChannel";
 
 /**
- * SHELL_CHEATSHEET.md §2 layout tree.
+ * The shell layout tree.
  *
  * `<MainPane>` and `<RightRail>` sit under **independent** error boundaries
- * (§7) — chat crashing must not kill the dashboard, and vice versa.
+ * — chat crashing must not kill the dashboard, and vice versa.
  *
- * `useKeyboard()` is mounted here and nowhere else (§6): at shell scope the
+ * `useKeyboard()` is mounted here and nowhere else: at shell scope the
  * bindings outlive every route change, so no screen can take a chord with it
  * when it unmounts.
  *
@@ -39,6 +41,9 @@ export function AppShell() {
   // now visible from every screen via the top bar, so its tick must outlive
   // every route change.
   useRecordingTick();
+  // Shell scope again: the menu bar is reachable from every screen, so the
+  // tray's recording controls must outlive route changes too.
+  useTrayCommandChannel();
   // Shell scope for the same reason as the tick: unsubscribing tears down the
   // Rust forwarding task, so anything said while the user is off `/recording`
   // would be dropped from the live buffer entirely.
@@ -46,6 +51,7 @@ export function AppShell() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-canvas">
+      <UpdateAvailableBanner />
       <TopBar />
 
       <div className="flex min-h-0 flex-1">
@@ -70,7 +76,7 @@ export function AppShell() {
 }
 
 /**
- * Full-bleed, no nav, no rail. Onboarding uses it (SHELL_CHEATSHEET.md §2).
+ * Full-bleed, no nav, no rail. Onboarding uses it.
  * Same providers, no chrome — and its own boundary at the root. No keyboard
  * registry: onboarding is a funnel, and ⌘N mid-setup has nowhere to go.
  */

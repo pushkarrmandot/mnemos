@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Blocks, ChevronRight, Folder, Home, Inbox, Plus, Settings, Users } from "lucide-react";
 import type { ComponentType, KeyboardEvent } from "react";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RevealMore } from "@/components/app/RevealMore";
 import { NAV_ROOT_ATTR } from "@/components/app/shell/useKeyboard";
 import { commands } from "@/ipc/client";
@@ -11,15 +11,15 @@ import { type MessageKey, t } from "@/lib/i18n";
 import { conversationFilter, conversationScopeKey } from "@/queries/conversationFilter";
 import { qk, staleTimes } from "@/queries/keys";
 import { usePagedConversations } from "@/queries/paged";
-import { useUIStore } from "@/stores/ui";
+import { NAV_WIDTH_MAX, NAV_WIDTH_MIN, useUIStore } from "@/stores/ui";
 
 /**
- * DESIGN_SYSTEM.md §7 (sidebar recipe) + §15 `density-dense`.
+ * Sidebar recipe, dense variant.
  * Active state: accent-tinted background, accent text, 2px inset left rule.
  *
- * ⌘L focuses the first row (SHELL_CHEATSHEET.md §6); from there ↑/↓ walk the
- * rows and Home/End jump to the ends, so the nav is reachable without the
- * mouse and without a tab-stop per row.
+ * ⌘L focuses the first row; from there ↑/↓ walk the rows and Home/End jump
+ * to the ends, so the nav is reachable without the mouse and without a
+ * tab-stop per row.
  */
 type NavEntry = { to: string; icon: ComponentType<{ className?: string }>; label: MessageKey };
 
@@ -77,6 +77,37 @@ function onNavKeyDown(event: KeyboardEvent<HTMLElement>) {
   moveFocus(container, target, delta);
 }
 
+/**
+ * Reads the name captured in onboarding (`onboarding.user_first_name` /
+ * `..._last_name`) — no separate profile record exists, so this is the same
+ * `qk.onboardingStatus()` query the root route already prefetches, not a
+ * new round trip. Initials-in-a-circle stands in for a photo avatar; there's
+ * no avatar upload in v1.
+ */
+function ProfileRow() {
+  const status = useQuery({
+    queryFn: () => commands.onboarding.getStatus(),
+    queryKey: qk.onboardingStatus(),
+  });
+
+  const firstName = status.data?.user_first_name?.trim();
+  const lastName = status.data?.user_last_name?.trim();
+  const fullName = [firstName, lastName].filter(Boolean).join(" ") || t("nav.profile.fallbackName");
+  const initial = (firstName ?? fullName).charAt(0).toUpperCase();
+
+  return (
+    <div className="density-dense flex items-center gap-2 rounded-sm px-2">
+      <span
+        aria-hidden="true"
+        className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent-primary-bg font-semibold text-accent-primary-text text-xs"
+      >
+        {initial}
+      </span>
+      <span className="truncate text-primary text-sm">{fullName}</span>
+    </div>
+  );
+}
+
 function NavRow({ entry }: { entry: NavEntry }) {
   const Icon = entry.icon;
 
@@ -121,8 +152,8 @@ function ConversationLeaf({ conversation }: { conversation: { id: string; title:
 }
 
 /**
- * Collapsible project tree row (02_DASHBOARD_AND_NAV.md's `PROJECTS` spec):
- * chevron + name + conversation count badge collapsed, conversations listed
+ * Collapsible project tree row: chevron + name + conversation count badge
+ * collapsed, conversations listed
  * inside when expanded. The chevron toggles expansion without navigating;
  * the name row navigates to Project Detail — same split Otter/most nav
  * trees use, so the two gestures don't fight each other.
@@ -134,8 +165,8 @@ function ProjectTreeRow({ project }: { project: { id: string; name: string } }) 
   });
 
   const scope = conversationFilter({ projectId: project.id });
-  // The badge is a `COUNT(*)`, not `rows.length`. Rendering "128" used to cost
-  // loading 128 rows — per expanded project, on every nav render.
+  // The badge is a `COUNT(*)`, not `rows.length` — loading every row per
+  // expanded project just to render a badge would be wasteful.
   const count = useQuery({
     queryFn: () => commands.countConversations(scope),
     queryKey: qk.conversationsCount(conversationScopeKey(scope)),
@@ -232,16 +263,16 @@ function ProjectTreeRow({ project }: { project: { id: string; name: string } }) 
 }
 
 /**
- * Fixed row for unfiled conversations — deliberately NOT a project (W15
- * design decision: recordings never require a project, and unfiled is a
- * permanent, first-class state, not a stopgap). Distinct tray icon, sits
+ * Fixed row for unfiled conversations — deliberately NOT a project:
+ * recordings never require a project, and unfiled is a permanent,
+ * first-class state, not a stopgap. Distinct tray icon, sits
  * above `PROJECTS`, and is not collapsible the way a project row is — it's
  * one flat destination (`/recordings`), same shape as `Home`/`Contacts`.
  */
 function RecordingsRow() {
-  // A `COUNT(*)` over `project_id IS NULL`. This used to load *every*
-  // conversation in the database and count the unfiled ones in JavaScript —
-  // the single most expensive query in the app, run to render one badge.
+  // A `COUNT(*)` over `project_id IS NULL` — counting in JavaScript by
+  // loading every conversation would be the single most expensive query in
+  // the app, run just to render one badge.
   const scope = conversationFilter({ unfiledOnly: true });
   const unfiled = useQuery({
     queryFn: () => commands.countConversations(scope),
@@ -280,19 +311,86 @@ function RecordingsRow() {
 
 export function LeftNav() {
   const openModal = useUIStore((state) => state.openModal);
+  const navWidth = useUIStore((state) => state.navWidth);
+  const setNavWidth = useUIStore((state) => state.setNavWidth);
   const projects = useQuery({
     queryFn: () => commands.listProjects(),
     queryKey: qk.projects(),
     staleTime: staleTimes.never,
   });
 
+  // Same drag-resize mechanism as `RightRail.tsx`'s chat panel — see its
+  // comments for why the live width is separate local state from the
+  // persisted store value (avoids a localStorage write per pointermove) and
+  // why `null` doubles as "not currently dragging". The one real
+  // difference: the nav sits on the *left* edge of the window with its
+  // handle on the *right* edge of itself, so width tracks `e.clientX`
+  // directly — dragging right (positive clientX) widens it — rather than
+  // the rail's `innerWidth - clientX`.
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const draggingRef = useRef(false);
+
+  const onPointerMove = useCallback((e: PointerEvent) => {
+    if (!draggingRef.current) return;
+    setDragWidth(e.clientX);
+  }, []);
+
+  const endDrag = useCallback(() => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    setDragWidth((width) => {
+      if (width != null) setNavWidth(width);
+      return null;
+    });
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, [setNavWidth]);
+
+  useEffect(() => {
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", endDrag);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+    };
+  }, [onPointerMove, endDrag]);
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    setDragWidth(navWidth);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   return (
     <nav
       aria-label={t("nav.label")}
-      className="flex w-(--nav-width) shrink-0 flex-col border-subtle border-r bg-subtle"
+      className="relative flex shrink-0 flex-col border-subtle border-r bg-subtle"
       onKeyDown={onNavKeyDown}
+      style={{ width: dragWidth ?? navWidth }}
       {...{ [NAV_ROOT_ATTR]: "" }}
     >
+      {/* biome-ignore lint/a11y/useSemanticElements: an <hr> can't be an interactive drag/keyboard-resize handle — WAI-ARIA "window splitter" pattern (focusable separator + aria-value*), matching RightRail's own resize handle. */}
+      <div
+        aria-label="Resize navigation"
+        aria-orientation="vertical"
+        aria-valuemax={NAV_WIDTH_MAX}
+        aria-valuemin={NAV_WIDTH_MIN}
+        aria-valuenow={Math.round(dragWidth ?? navWidth)}
+        className={cn(
+          "absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize touch-none",
+          "hover:bg-accent-primary/20",
+          dragWidth != null && "bg-accent-primary/20",
+        )}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowLeft") setNavWidth(navWidth - 16);
+          if (e.key === "ArrowRight") setNavWidth(navWidth + 16);
+        }}
+        onPointerDown={startDrag}
+        role="separator"
+        tabIndex={0}
+      />
       <div className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
         <div className="type-micro px-2 pt-2 pb-1 text-tertiary">{t("nav.section.workspace")}</div>
 
@@ -329,7 +427,8 @@ export function LeftNav() {
           configuration, not a destination someone jumps to alongside their
           projects, so it's pinned below the scroll area instead of mixed
           into ENTRIES. */}
-      <div className="shrink-0 border-subtle border-t p-2">
+      <div className="flex shrink-0 flex-col gap-1 border-subtle border-t p-2">
+        <ProfileRow />
         <NavRow entry={SETTINGS_ENTRY} />
       </div>
     </nav>

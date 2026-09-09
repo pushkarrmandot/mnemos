@@ -1,5 +1,5 @@
 /**
- * DESIGN_SYSTEM.md §14 — the motion vocabulary as JS values, for the cases CSS
+ * The motion vocabulary as JS values, for the cases CSS
  * can't reach (Framer Motion transitions, imperative animations). Curves are
  * never hand-typed in components; import from here.
  *

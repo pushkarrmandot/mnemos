@@ -10,7 +10,7 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
 }));
 
-/** SHELL_CHEATSHEET.md §6 — one row of the table per assertion. */
+/** One row of the keyboard table per assertion. */
 function Harness() {
   useKeyboard();
   return (

@@ -12,7 +12,7 @@ export function RightRail() {
   const setRailOpen = useUIStore((state) => state.setRailOpen);
   const railWidth = useUIStore((state) => state.railWidth);
   const setRailWidth = useUIStore((state) => state.setRailWidth);
-  // LLD-11 "chat pane stays force-collapsed while recording" — active
+  // The chat pane stays force-collapsed while recording — active
   // capture states only (the shared definition, `ACTIVE_CAPTURE_STATES`);
   // once Stop is pressed the route has already navigated away from
   // `/recording`.

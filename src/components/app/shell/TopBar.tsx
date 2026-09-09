@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Check, ChevronDown, FolderOpen, Mic, Pause, Play, Search, Square } from "lucide-react";
+import { Check, ChevronDown, FolderOpen, Mic, Pause, Play, Square } from "lucide-react";
 import { Logo } from "@/components/app/shell/Logo";
 import {
   DropdownMenu,
@@ -22,21 +22,26 @@ import { ACTIVE_CAPTURE_STATES, useRecordingStore } from "@/stores/recording";
 import { useUIStore } from "@/stores/ui";
 
 /**
- * `02_DASHBOARD_AND_NAV.md` "Global top-bar controls" — spans the full
- * window width above the left nav and main content. Search is visual-only
- * this pass (placeholder + disabled input, per explicit product direction —
- * "keep the visuals and UX ready, we'll wire search later"). Record is real:
- * the main button starts an unfiled recording immediately (W15 design
- * decision — zero project gate); the chevron opens a project picker that
- * starts a recording pre-assigned to that project.
+ * "Global top-bar controls" — spans the full
+ * window width above the left nav and main content.
+ *
+ * A disabled search box used to sit here, kept as visual-only chrome ahead
+ * of search being wired up. It has been removed: a dead input in the most
+ * prominent slot in the app doesn't read as "not built yet", it reads as
+ * broken. Search comes back here when it actually searches — until then the
+ * bar carries only controls that do something. (⌘K's palette is still a
+ * placeholder, but it is opened deliberately rather than sitting on screen
+ * inviting a click.)
+ *
+ * Record is real: the main button starts an unfiled recording immediately
+ * (zero project gate); the chevron opens a project picker that starts a
+ * recording pre-assigned to that project.
  *
  * While a capture is live this becomes a three-part control: elapsed clock
- * (click to open the live transcript), pause/resume, and Stop. W17c — it
- * previously rendered a single "Recording…" button that only navigated, so
- * the top bar advertised an action and delivered a status: stopping or
- * pausing meant first travelling to `/recording`. The spec's own line for
- * this state is "button changes to Stop Recording", and a control in the
- * chrome should offer the next action, not describe the current one.
+ * (click to open the live transcript), pause/resume, and Stop. A control in
+ * the chrome should offer the next action, not describe the current one —
+ * so stopping or pausing happens right here rather than requiring a trip to
+ * `/recording` first.
  */
 function RecordButton() {
   const navigate = useNavigate();
@@ -136,6 +141,25 @@ function RecordButton() {
     );
   }
 
+  const hasProjects = (projects.data ?? []).length > 0;
+
+  // No projects to pick from means the chevron would open a menu with
+  // nothing but "No project" in it — same fix as the meeting-detection
+  // overlay (product_docs/MEETING_AUTO_DETECT_DESIGN.md): omit the picker
+  // entirely rather than show an empty one.
+  if (!hasProjects) {
+    return (
+      <button
+        className="motion-quick flex h-[34px] items-center gap-1.5 rounded-lg bg-accent-primary px-3.5 font-semibold text-inverse text-sm hover:bg-accent-primary-hover"
+        onClick={() => startRecording.request(undefined)}
+        type="button"
+      >
+        <Mic aria-hidden="true" className="size-4" />
+        {t("action.record")}
+      </button>
+    );
+  }
+
   return (
     <div className="flex items-stretch overflow-hidden rounded-lg">
       <button
@@ -179,24 +203,8 @@ export function TopBar() {
   return (
     <header className="flex h-14 shrink-0 items-center gap-5 border-subtle border-b bg-elevated px-5">
       <div className="flex shrink-0 items-center gap-2">
-        <Logo className="size-6 text-[13px]" />
+        <Logo className="h-[18px]" />
         <span className="type-h2 text-primary">{t("app.name")}</span>
-      </div>
-
-      <div
-        className={cn(
-          "flex h-[34px] max-w-[480px] flex-1 items-center gap-2 rounded-lg border border-subtle",
-          "bg-subtle px-3 text-tertiary",
-        )}
-      >
-        <Search aria-hidden="true" className="size-4 shrink-0" />
-        <input
-          className="type-body w-full min-w-0 bg-transparent text-primary placeholder:text-tertiary focus:outline-none"
-          disabled
-          placeholder={t("search.placeholder")}
-          readOnly
-          type="text"
-        />
       </div>
 
       <div className="flex-1" />

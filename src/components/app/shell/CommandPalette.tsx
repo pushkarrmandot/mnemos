@@ -7,13 +7,14 @@ import { t } from "@/lib/i18n";
 import { useCmdKStore } from "@/stores/cmdk";
 
 /**
- * ⌘K placeholder (SHELL_CHEATSHEET.md §6; real palette is LLD-12b / W15).
+ * ⌘K placeholder — this is a placeholder: search field and chrome are
+ * final, but the results view isn't built yet.
  *
  * Everything visible here is final except the result list: the surface, the
- * search field, the scope label and the empty state are what W15 fills in. It
- * reads `useCmdKStore` rather than the modal slot because results live in the
- * Query cache under `qk.search(scope, q)` (LLD-10 §3.4) — the palette is its
- * own piece of chrome, not one of the five single-slot modals.
+ * search field, the scope label and the empty state. It reads `useCmdKStore`
+ * rather than the modal slot because results live in the Query cache under
+ * `qk.search(scope, q)` — the palette is its own piece of chrome, not one of
+ * the five single-slot modals.
  */
 export function CommandPalette() {
   const open = useCmdKStore((state) => state.open);

@@ -28,6 +28,15 @@
     overscroll-behavior: none;
   }
 
+  /* Links here are navigation targets, not draggable URLs. Every href is an
+     internal `tauri://localhost/...` one that means nothing dropped anywhere
+     else, so the browser's native link drag only ever produced a ghost chip
+     showing that URL next to the cursor. Dragging across a link now selects
+     its text, the way it does over any other text in the app. */
+  a {
+    -webkit-user-drag: none;
+  }
+
   h1,
   h2,
   h3,
