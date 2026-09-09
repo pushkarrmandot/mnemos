@@ -32,7 +32,7 @@ pub const ONBOARDING_COMPLETED: &str = "onboarding_completed";
 pub const ONBOARDING_PERMISSION_RESULT: &str = "onboarding_permission_result";
 /// Crash/stuck-state recovery (`recover_interrupted_recording`,
 /// `discard_interrupted_recording`, `resume_stuck_processing`,
-/// `discard_stuck_processing`) — previously invisible: no event tracked how
+/// `discard_stuck_processing`) — tracks how
 /// often anyone actually hits these paths.
 pub const RECORDING_RECOVERED: &str = "recording_recovered";
 pub const RECORDING_DISCARDED_AFTER_CRASH: &str = "recording_discarded_after_crash";
@@ -59,4 +59,21 @@ pub fn known_property_key(key: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|&known| known == key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_property_key_returns_the_interned_static_str_on_a_hit() {
+        assert_eq!(known_property_key("theme"), Some("theme"));
+        assert_eq!(known_property_key("platform"), Some("platform"));
+    }
+
+    #[test]
+    fn known_property_key_rejects_anything_outside_the_allowlist() {
+        assert_eq!(known_property_key("not_a_real_key"), None);
+        assert_eq!(known_property_key(""), None);
+    }
 }

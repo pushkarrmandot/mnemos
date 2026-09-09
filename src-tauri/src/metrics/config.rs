@@ -148,3 +148,85 @@ impl MetricsConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::service::SqliteStorageService;
+
+    async fn test_storage() -> SqliteStorageService {
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the tempdir for the test's lifetime — dropped `TempDir`s
+        // delete on drop, and this fn returns before the caller is done
+        // with the db file (same convention as `commands::onboarding`'s
+        // own `test_storage`).
+        let path = Box::leak(Box::new(dir)).path().join("mnemos.db");
+        let pools = crate::db::init(&path).await.expect("db init");
+        SqliteStorageService::new(pools)
+    }
+
+    #[tokio::test]
+    async fn resolve_for_app_creates_and_persists_install_id_on_first_run() {
+        let storage = test_storage().await;
+        let cfg = MetricsConfig::resolve_for_app(&storage, "1.0.0".into()).await;
+        assert!(!cfg.install_id.is_empty());
+        assert!(cfg.enabled, "metrics default to enabled on first run");
+        assert_eq!(cfg.process_kind, "app");
+
+        let persisted = storage
+            .get_setting(KEY_INSTALL_ID)
+            .await
+            .unwrap()
+            .and_then(|v| v.as_str().map(str::to_string));
+        assert_eq!(persisted, Some(cfg.install_id));
+    }
+
+    #[tokio::test]
+    async fn resolve_for_app_is_stable_across_repeated_resolves() {
+        let storage = test_storage().await;
+        let first = MetricsConfig::resolve_for_app(&storage, "1.0.0".into()).await;
+        let second = MetricsConfig::resolve_for_app(&storage, "1.0.0".into()).await;
+        assert_eq!(first.install_id, second.install_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_for_app_respects_a_persisted_disabled_flag() {
+        let storage = test_storage().await;
+        storage
+            .set_setting(KEY_ENABLED, serde_json::Value::Bool(false))
+            .await
+            .unwrap();
+        let cfg = MetricsConfig::resolve_for_app(&storage, "1.0.0".into()).await;
+        assert!(!cfg.enabled);
+    }
+
+    #[tokio::test]
+    async fn resolve_for_mcp_never_writes_and_falls_back_to_an_ephemeral_id() {
+        let storage = test_storage().await;
+        let cfg = MetricsConfig::resolve_for_mcp(&storage, "1.0.0".into()).await;
+        assert!(!cfg.install_id.is_empty());
+        assert_eq!(cfg.process_kind, "mcp_server");
+
+        // resolve_for_mcp is read-only: it must not have persisted the
+        // fallback id it just minted.
+        let persisted = storage.get_setting(KEY_INSTALL_ID).await.unwrap();
+        assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_for_mcp_picks_up_an_install_id_already_written_by_the_app() {
+        let storage = test_storage().await;
+        let app_cfg = MetricsConfig::resolve_for_app(&storage, "1.0.0".into()).await;
+        let mcp_cfg = MetricsConfig::resolve_for_mcp(&storage, "1.0.0".into()).await;
+        assert_eq!(app_cfg.install_id, mcp_cfg.install_id);
+    }
+
+    #[test]
+    fn disabled_config_carries_no_api_key_and_is_disabled() {
+        let cfg = MetricsConfig::disabled("1.0.0".into(), "app");
+        assert!(!cfg.enabled);
+        assert!(cfg.api_key.is_none());
+        assert_eq!(cfg.install_id, "");
+        assert_eq!(cfg.process_kind, "app");
+    }
+}

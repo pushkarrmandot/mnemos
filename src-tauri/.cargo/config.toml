@@ -19,7 +19,7 @@
 # an event end-to-end in PostHog's live view.
 
 [env]
-POSTHOG_API_KEY = "phc_your_real_key_here"
+POSTHOG_API_KEY = "phc_ydjeEFwgd9M87jyyvLKoRFWxEuJ8SbQnRffGTtsJM8KN"
 # Omit POSTHOG_HOST entirely to use the default (PostHog US cloud,
 # https://us.i.posthog.com). Set it only for EU cloud or a self-hosted
 # instance, e.g.:

@@ -58,3 +58,71 @@ pub(crate) fn props_to_json(props: &EventProperties) -> serde_json::Value {
             .collect(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bool_serializes_to_json_bool() {
+        assert_eq!(PropertyValue::Bool(true).to_json(), serde_json::json!(true));
+        assert_eq!(
+            PropertyValue::Bool(false).to_json(),
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn int_serializes_to_json_number_and_keeps_sign() {
+        assert_eq!(PropertyValue::Int(-42).to_json(), serde_json::json!(-42));
+    }
+
+    #[test]
+    fn uint_serializes_to_json_number() {
+        assert_eq!(PropertyValue::UInt(42).to_json(), serde_json::json!(42));
+    }
+
+    #[test]
+    fn float_serializes_to_json_number() {
+        assert_eq!(PropertyValue::Float(1.5).to_json(), serde_json::json!(1.5));
+    }
+
+    #[test]
+    fn enum_serializes_to_json_string() {
+        assert_eq!(
+            PropertyValue::Enum("dark").to_json(),
+            serde_json::json!("dark")
+        );
+    }
+
+    #[test]
+    fn enum_owned_serializes_to_json_string() {
+        assert_eq!(
+            PropertyValue::EnumOwned("dark".to_string()).to_json(),
+            serde_json::json!("dark")
+        );
+    }
+
+    #[test]
+    fn duration_ms_serializes_to_json_number() {
+        assert_eq!(
+            PropertyValue::DurationMs(1234).to_json(),
+            serde_json::json!(1234)
+        );
+    }
+
+    #[test]
+    fn props_to_json_builds_an_object_keyed_by_property_name() {
+        let mut props: EventProperties = EventProperties::new();
+        props.insert("theme", PropertyValue::Enum("dark"));
+        props.insert("count", PropertyValue::UInt(3));
+        let json = props_to_json(&props);
+        assert_eq!(json, serde_json::json!({"theme": "dark", "count": 3}));
+    }
+
+    #[test]
+    fn props_to_json_on_empty_map_is_an_empty_object() {
+        let props: EventProperties = EventProperties::new();
+        assert_eq!(props_to_json(&props), serde_json::json!({}));
+    }
+}
