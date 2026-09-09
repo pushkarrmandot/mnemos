@@ -60,6 +60,28 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  version-consistency:
+    name: package.json and Cargo.toml versions match
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # tauri.conf.json has no "version" field — Tauri reads it from
+      # Cargo.toml at build time, so Cargo.toml is the single source of
+      # truth for the app version. package.json still needs its own
+      # version field (npm has no equivalent fallback), so this just
+      # catches drift between the two rather than eliminating the second
+      # field outright.
+      - name: Compare package.json and Cargo.toml versions
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          CARGO_VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "package.json: $PKG_VERSION"
+          echo "Cargo.toml:   $CARGO_VERSION"
+          if [ "$PKG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) and Cargo.toml version ($CARGO_VERSION) must match"
+            exit 1
+          fi
+
   bindings:
     name: specta bindings are committed
     runs-on: macos-14

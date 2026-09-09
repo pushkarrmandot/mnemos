@@ -1,0 +1,134 @@
+name: Release
+
+# NOT USABLE YET — do not push a `v*` tag expecting this to produce a
+# shippable app. Releases are cut locally with `scripts/build_macos_app.sh`
+# until the TODOs below are done.
+#
+# TODO(ci): this workflow cannot build Mnemos as written. A fresh checkout is
+# missing everything the local script produces, because all of it is
+# gitignored (.gitignore:22-23) and one piece is 509 MB:
+#
+#   - src-tauri/binaries/        Swift audio sidecar + meeting watcher
+#   - src-tauri/bundled/         the 509 MB CPython interpreter
+#
+# `tauri-action` below goes straight from `pnpm install` to bundling, so it
+# would either fail to resolve the sidecars or ship an app with no
+# transcription. The four steps `scripts/build_macos_app.sh` performs — and
+# the ordering constraints in its header, each of which has already cost a
+# debugging session — all need porting here:
+#
+#   1. swift build (both binaries) + codesign each with entitlements
+#   2. scripts/sync_python_bundle.sh   — src-python/ into the interpreter
+#   3. scripts/sign_python_bundle.sh   — 234 Mach-O binaries, JIT
+#                                        entitlements included; without them
+#                                        the worker is SIGKILLed at runtime
+#   4. scripts/stage_mcp_server_alias.sh — before bundling, not after
+#
+# Step 2/3 need the interpreter to exist on the runner at all: decide whether
+# CI builds it from scratch or restores it from a cache/release asset.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # Runs before the approval gate and before any signing secret is touched,
+  # so a forgotten `LOCKED_MIGRATIONS` update fails the release in seconds
+  # instead of after a maintainer has already clicked approve. Catches
+  # exactly the mistake this guard exists for: shipping a real release
+  # while `LOCKED_MIGRATIONS` in src-tauri/src/db/mod.rs is still the
+  # pre-v1 empty list, which would leave `migration_lock.rs` unable to
+  # protect anyone's already-applied migrations after this release.
+  guard-migrations-locked:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if LOCKED_MIGRATIONS is still empty
+        run: |
+          if grep -qE '^pub const LOCKED_MIGRATIONS: &\[&str\] = &\[\];' src-tauri/src/db/mod.rs; then
+            echo "::error::LOCKED_MIGRATIONS in src-tauri/src/db/mod.rs is still empty — a tagged release must lock at least 001_init.sql (and its hash in src-tauri/tests/migration_lock.rs's EXPECTED_HASHES) before anyone else's already-applied migrations can be protected. See migration_lock.rs's doc comment."
+            exit 1
+          fi
+
+  release:
+    needs: guard-migrations-locked
+    # Requires a "release" environment configured in repo Settings ->
+    # Environments with you as a required reviewer. A tag push starts this
+    # job but it pauses here until manually approved in the Actions tab —
+    # secrets are never touched before that approval. Also gate who can
+    # push a `v*` tag at all via Settings -> Tags -> tag protection rules,
+    # so approval and tag-push are two independent locks, not one.
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon only. NOT `universal-apple-darwin`: a universal
+          # binary carries both arm64 and x86_64, but the three things Tauri
+          # does not compile are arm64-only — both Swift sidecars (resolved
+          # by target-triple filename suffix, so a universal build looks for
+          # `-universal-apple-darwin` names that do not exist) and
+          # `bundled/python-macos-arm64`. Going universal means x86_64 Swift
+          # builds, a `lipo` step, and a second Python bundle.
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          # TODO(windows): unsigned Windows builds are deferred — SmartScreen
+          # flags an unknown publisher until a code-signing cert exists, and
+          # the sidecar/Python bundling above has no Windows equivalent yet.
+          # - platform: windows-latest
+          #   args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      # macOS only: tauri-action's signing/notarization step needs the
+      # Developer ID cert in the local keychain, not just the secret bytes.
+      - name: Import Apple signing certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Mnemos ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
