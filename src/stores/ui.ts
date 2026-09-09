@@ -5,13 +5,13 @@ import { ulid } from "@/lib/ulid";
 import { safeStorage } from "./persist";
 
 /**
- * Cross-feature UI chrome: theme, nav, modals, toasts (LLD-10 §3.1).
+ * Cross-feature UI chrome: theme, nav, modals, toasts.
  *
- * W2 shipped the theme slice; W3 extends this same store rather than standing
+ * Every UI-only slice extends this same store rather than standing
  * up a competing one. The store never touches the DOM — `<ThemeProvider>` is
  * the only writer of `<html data-theme>`.
  *
- * PROVISIONAL divergence from LLD-10 §3.1, per SHELL_CHEATSHEET.md §3: theme is
+ * PROVISIONAL divergence from the spec: theme is
  * `"light" | "dark" | "system"`, not `"light" | "dark"`. One source of truth
  * beats a store plus a side-channel in localStorage.
  */
@@ -31,9 +31,6 @@ const UI_STORAGE_KEY = "mnemos.ui";
 export type ModalId =
   | "new-project"
   | "delete-conversation"
-  | "delete-project"
-  | "merge-contact"
-  | "unrecoverable-error"
   | "confirm-quit-while-recording"
   | "stop-confirmation"
   | "start-recording-confirmation"
@@ -83,7 +80,23 @@ function clampRailWidth(width: number): number {
   return Math.min(RAIL_WIDTH_MAX, Math.max(RAIL_WIDTH_MIN, width));
 }
 
-type PersistedUI = { theme: ThemePreference; sidebarCollapsed: boolean; railWidth: number };
+/** Same drag-resize mechanism, mirrored for the left nav (`LeftNav.tsx`) —
+ * narrower bounds than the chat rail since the nav only ever holds a jump
+ * list of icons/labels, never prose or a chat transcript. */
+export const NAV_WIDTH_MIN = 180;
+export const NAV_WIDTH_MAX = 360;
+export const NAV_WIDTH_DEFAULT = 208; // matches tokens.css's `--nav-width`
+
+function clampNavWidth(width: number): number {
+  return Math.min(NAV_WIDTH_MAX, Math.max(NAV_WIDTH_MIN, width));
+}
+
+type PersistedUI = {
+  theme: ThemePreference;
+  sidebarCollapsed: boolean;
+  railWidth: number;
+  navWidth: number;
+};
 
 /**
  * Two keys, one adapter. The theme is written as a bare string under
@@ -96,6 +109,7 @@ const uiStorage: PersistStorage<PersistedUI> = {
     const theme = safeStorage.getItem(THEME_STORAGE_KEY);
     let sidebarCollapsed = false;
     let railWidth = RAIL_WIDTH_DEFAULT;
+    let navWidth = NAV_WIDTH_DEFAULT;
     try {
       const raw = safeStorage.getItem(UI_STORAGE_KEY);
       if (raw) {
@@ -107,16 +121,30 @@ const uiStorage: PersistStorage<PersistedUI> = {
           const stored = (parsed as { railWidth: unknown }).railWidth;
           if (typeof stored === "number") railWidth = clampRailWidth(stored);
         }
+        if (typeof parsed === "object" && parsed !== null && "navWidth" in parsed) {
+          const stored = (parsed as { navWidth: unknown }).navWidth;
+          if (typeof stored === "number") navWidth = clampNavWidth(stored);
+        }
       }
     } catch {
       // Corrupt envelope: fall back to defaults rather than blocking boot.
     }
 
-    if (!isThemePreference(theme) && !sidebarCollapsed && railWidth === RAIL_WIDTH_DEFAULT) {
+    if (
+      !isThemePreference(theme) &&
+      !sidebarCollapsed &&
+      railWidth === RAIL_WIDTH_DEFAULT &&
+      navWidth === NAV_WIDTH_DEFAULT
+    ) {
       return null;
     }
     return {
-      state: { theme: isThemePreference(theme) ? theme : "light", sidebarCollapsed, railWidth },
+      state: {
+        theme: isThemePreference(theme) ? theme : "light",
+        sidebarCollapsed,
+        railWidth,
+        navWidth,
+      },
     };
   },
   setItem: (_name, value) => {
@@ -126,6 +154,7 @@ const uiStorage: PersistStorage<PersistedUI> = {
       JSON.stringify({
         sidebarCollapsed: value.state.sidebarCollapsed,
         railWidth: value.state.railWidth,
+        navWidth: value.state.navWidth,
       }),
     );
   },
@@ -140,6 +169,7 @@ type UIState = {
   sidebarCollapsed: boolean;
   railOpen: boolean;
   railWidth: number;
+  navWidth: number;
   activeView: ViewId;
   modal: ModalId | null;
   modalProps: unknown;
@@ -149,6 +179,7 @@ type UIState = {
   setSidebarCollapsed: (collapsed: boolean) => void;
   setRailOpen: (open: boolean) => void;
   setRailWidth: (width: number) => void;
+  setNavWidth: (width: number) => void;
   setActiveView: (view: ViewId) => void;
   /** Single-slot: opening a second modal replaces the first (CHEATSHEET §5). */
   openModal: <P>(id: ModalId, props?: P) => void;
@@ -161,11 +192,12 @@ type UIState = {
 export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
-      // DESIGN_SYSTEM.md: light is the default; dark and system are opt-in.
+      // Light is the default; dark and system are opt-in.
       theme: "light",
       sidebarCollapsed: false,
       railOpen: true,
       railWidth: RAIL_WIDTH_DEFAULT,
+      navWidth: NAV_WIDTH_DEFAULT,
       activeView: "dashboard",
       modal: null,
       modalProps: undefined,
@@ -182,6 +214,7 @@ export const useUIStore = create<UIState>()(
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
       setRailOpen: (railOpen) => set({ railOpen }),
       setRailWidth: (width) => set({ railWidth: clampRailWidth(width) }),
+      setNavWidth: (width) => set({ navWidth: clampNavWidth(width) }),
       setActiveView: (activeView) => set({ activeView }),
 
       openModal: (modal, modalProps) => set({ modal, modalProps }),
@@ -212,6 +245,7 @@ export const useUIStore = create<UIState>()(
         theme: state.theme,
         sidebarCollapsed: state.sidebarCollapsed,
         railWidth: state.railWidth,
+        navWidth: state.navWidth,
       }),
     },
   ),

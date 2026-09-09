@@ -9,7 +9,9 @@ export {
   type ConversationStatus,
   commands,
   type Decision,
+  type DeletedExtraction,
   describeError,
+  type ExtractionKind,
   isAppError,
   normalizeError,
   type OpenQuestion,
@@ -21,5 +23,6 @@ export {
   type ProjectMemory,
   type ProjectPulseItem,
   type TranscriptDoc,
+  type TranscriptionModelInfo,
   type TranscriptTurn,
 } from "./client";

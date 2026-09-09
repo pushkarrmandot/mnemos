@@ -53,8 +53,8 @@ export function conversationFilter(input: ConversationFilterInput = {}): Convers
  * different page sizes should still invalidate each other.
  *
  * Everything else *must* be in the key. Dashboard, Recordings and the left nav
- * all read conversations and all want different subsets; before W18 they
- * shared one `["conversations"]` key and would have overwritten each other's
+ * all read conversations and all want different subsets; sharing one
+ * `["conversations"]` key across them would overwrite each other's
  * cache entry the moment they stopped fetching identical data.
  */
 export function conversationScopeKey(filter: ConversationFilter) {

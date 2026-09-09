@@ -1,7 +1,7 @@
 import { type ToastKind, useUIStore } from "@/stores/ui";
 
 /**
- * Thin façade over `useUIStore.pushToast` (SHELL_CHEATSHEET.md §4).
+ * Thin façade over `useUIStore.pushToast`.
  *
  * Exists so callers outside React — mutation callbacks, the event bridge —
  * raise toasts without reaching for `getState()` themselves, and so TTL policy

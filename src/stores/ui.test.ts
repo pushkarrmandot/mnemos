@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "@/lib/toast";
-import { RAIL_WIDTH_DEFAULT, THEME_STORAGE_KEY, useUIStore } from "./ui";
+import { NAV_WIDTH_DEFAULT, RAIL_WIDTH_DEFAULT, THEME_STORAGE_KEY, useUIStore } from "./ui";
 
 function reset() {
   useUIStore.setState({
@@ -8,6 +8,7 @@ function reset() {
     sidebarCollapsed: false,
     railOpen: true,
     railWidth: RAIL_WIDTH_DEFAULT,
+    navWidth: NAV_WIDTH_DEFAULT,
     activeView: "dashboard",
     modal: null,
     modalProps: undefined,
@@ -29,6 +30,7 @@ describe("useUIStore", () => {
     expect(JSON.parse(localStorage.getItem("mnemos.ui") ?? "{}")).toEqual({
       sidebarCollapsed: true,
       railWidth: RAIL_WIDTH_DEFAULT,
+      navWidth: NAV_WIDTH_DEFAULT,
     });
   });
 
@@ -43,12 +45,23 @@ describe("useUIStore", () => {
     expect(useUIStore.getState().railWidth).toBeGreaterThanOrEqual(280);
   });
 
-  it("keeps one modal slot — opening a second replaces the first", () => {
-    useUIStore.getState().openModal("delete-project", { id: "p1" });
-    expect(useUIStore.getState().modal).toBe("delete-project");
+  it("persists navWidth, clamped to its bounds", () => {
+    useUIStore.getState().setNavWidth(999);
+    expect(useUIStore.getState().navWidth).toBeLessThanOrEqual(360);
+    expect(JSON.parse(localStorage.getItem("mnemos.ui") ?? "{}").navWidth).toBe(
+      useUIStore.getState().navWidth,
+    );
 
-    useUIStore.getState().openModal("merge-contact", { id: "c1" });
-    expect(useUIStore.getState().modal).toBe("merge-contact");
+    useUIStore.getState().setNavWidth(10);
+    expect(useUIStore.getState().navWidth).toBeGreaterThanOrEqual(180);
+  });
+
+  it("keeps one modal slot — opening a second replaces the first", () => {
+    useUIStore.getState().openModal("new-project");
+    expect(useUIStore.getState().modal).toBe("new-project");
+
+    useUIStore.getState().openModal("delete-conversation", { id: "c1" });
+    expect(useUIStore.getState().modal).toBe("delete-conversation");
     expect(useUIStore.getState().modalProps).toEqual({ id: "c1" });
 
     useUIStore.getState().closeModal();

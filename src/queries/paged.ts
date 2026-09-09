@@ -115,14 +115,14 @@ export function usePagedDecisions(projectId: string, pageSize: number): PagedRes
 
 export function usePagedProjectActionItems(
   projectId: string,
-  includeDone: boolean,
+  done: boolean,
   pageSize: number,
 ): PagedResult<ActionItemWithSource> {
   const query = useInfiniteQuery({
-    queryKey: qk.projectActionItems(projectId, includeDone),
+    queryKey: qk.projectActionItems(projectId, done),
     queryFn: ({ pageParam }) =>
       commands.project.listActionItems(projectId, {
-        includeDone,
+        done,
         limit: pageSize,
         offset: pageParam,
       }),
@@ -134,13 +134,13 @@ export function usePagedProjectActionItems(
 }
 
 export function usePagedMyActionItems(
-  includeDone: boolean,
+  done: boolean,
   pageSize: number,
 ): PagedResult<ActionItemWithSource> {
   const query = useInfiniteQuery({
-    queryKey: qk.myActionItems(includeDone),
+    queryKey: qk.myActionItems(done),
     queryFn: ({ pageParam }) =>
-      commands.conversation.listMyActionItems({ includeDone, limit: pageSize, offset: pageParam }),
+      commands.conversation.listMyActionItems({ done, limit: pageSize, offset: pageParam }),
     initialPageParam: 0,
     getNextPageParam: nextOffset,
     staleTime: staleTimes.never,

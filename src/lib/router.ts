@@ -3,7 +3,7 @@ import { routeTree } from "@/routeTree.gen";
 
 /**
  * The router singleton, split out of `App.tsx` so non-component code can
- * navigate too — currently `useTauriEventBridge` (gap #6, LLD-03 §9: a
+ * navigate too — currently `useTauriEventBridge` (a
  * `recordingWarning`'s "View partial" toast action navigates to the
  * conversation's Detail page from an event listener, not a click handler).
  */

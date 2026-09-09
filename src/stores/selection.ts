@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * What the user currently has open (LLD-10 §3.5).
+ * What the user currently has open.
  *
  * Selection parameterizes Query keys — the chat pane reads
  * `useChatMessages(useSelectionStore(s => s.chatSessionId))`, so a selection

@@ -1,9 +1,9 @@
 /**
- * Tiny ULID mint (LLD-10 §9). Lexicographically sortable, 26 chars,
+ * Tiny ULID mint. Lexicographically sortable, 26 chars,
  * Crockford base32: 48-bit timestamp + 80 bits of randomness.
  *
  * Used for client-minted ids that must sort by creation time — toast ids and
- * chat outbox `clientId`s (LLD-10 §8.2). Not a general-purpose UUID: the
+ * chat outbox `clientId`s. Not a general-purpose UUID: the
  * monotonic-within-a-millisecond guarantee of the spec is not implemented,
  * because nothing here mints two ids inside the same tick where order matters.
  */

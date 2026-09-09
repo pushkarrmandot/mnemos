@@ -3,7 +3,7 @@ import { clearMocks } from "@tauri-apps/api/mocks";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
-// Every test declares its own command mocks via `mockIPC` (FRONTEND §7);
+// Every test declares its own command mocks via `mockIPC`;
 // unmocked commands then fail loudly instead of leaking across tests.
 afterEach(() => {
   cleanup();

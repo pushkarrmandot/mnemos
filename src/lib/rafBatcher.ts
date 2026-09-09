@@ -1,11 +1,11 @@
 /**
- * Client-side streaming coalescer (LLD-10 §7).
+ * Client-side streaming coalescer.
  *
  * Rust already coalesces at the source (33 ms chat / 100 ms transcript). This
  * batcher exists to bound React renders when several streams flush inside the
  * same frame, and to collapse many `token_delta` frames into one store write.
  *
- * One instance per active `Channel` — never a singleton (§7.3), so a slow chat
+ * One instance per active `Channel` — never a singleton, so a slow chat
  * flush cannot delay a transcript flush.
  */
 export interface RafBatcher<T> {

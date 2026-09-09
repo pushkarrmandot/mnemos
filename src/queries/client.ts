@@ -2,10 +2,10 @@ import { QueryClient } from "@tanstack/react-query";
 import type { AppError } from "@/ipc";
 
 /**
- * The singleton `QueryClient` (LLD-10 §4.1).
+ * The singleton `QueryClient`.
  *
  * Exported as a module singleton, not created in a component: the event bridge
- * (§6) and the chat send mutation both dispatch invalidations from outside the
+ * and the chat send mutation both dispatch invalidations from outside the
  * React tree.
  *
  * `refetchOnWindowFocus` is off by design — one machine, one user. Every write

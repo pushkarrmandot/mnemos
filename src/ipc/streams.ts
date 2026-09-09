@@ -8,15 +8,15 @@ import { normalizeError } from "./errors";
 
 export type { TranscriptChunk };
 /**
- * Channel-carrying commands (FRONTEND §3 "per-stream data → Channel").
+ * Channel-carrying commands ("per-stream data → Channel").
  *
- * `subscribeTranscript`/`unsubscribeTranscript` are real (W9) — see
+ * `subscribeTranscript`/`unsubscribeTranscript` are real — see
  * `src-tauri/src/commands/recording.rs`. Chat is real too, but not through
  * this file — `chat_send_prompt` returns a session id synchronously and only
  * needs one call, so it's a plain command in `@/ipc/client`, not a
  * subscribe/unsubscribe pair; `useChatStreamChannel.ts` builds its
  * `Channel<AgentEvent>` directly from `@tauri-apps/api/core` +
- * `@bindings`'s real `AgentEvent` type. Model download (W15) is real too —
+ * `@bindings`'s real `AgentEvent` type. Model download is real too —
  * `commands::onboarding::onboarding_subscribe_model_download` — see its doc
  * comment for why there's no separate "start" call: `_modelId` stays
  * unused because v1 has exactly one downloadable model (Parakeet); the
@@ -25,16 +25,16 @@ export type { TranscriptChunk };
  */
 export { Channel };
 
-/** 100 ms audio level sample (LLD-03 §3.1). */
+/** 100 ms audio level sample. */
 export interface LevelSample {
   session_id: number;
   mic_db: number;
   system_db: number;
 }
 
-/** Byte progress for a model download (HLD §4.2) — the real generated
+/** Byte progress for a model download — the real generated
  * type, not a hand-rolled duplicate (a duplicate wire-shape type is exactly
- * what caused this session's earlier `chatSessionId`/`AgentEvent` bug). */
+ * what caused an earlier `chatSessionId`/`AgentEvent` bug). */
 export type ModelDownloadProgress = ModelDownloadStatusResponse;
 
 async function unwrapVoid(command: string, call: ReturnType<typeof generated.subscribeTranscript>) {

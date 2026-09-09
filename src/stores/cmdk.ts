@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * Global ⌘K palette chrome (LLD-10 §3.4).
+ * Global ⌘K palette chrome.
  *
  * Results are **not** stored here — `SearchResults` lives in the Query cache
  * under `qk.search(scope, q)`, so ⌘K → Esc → ⌘K inside `staleTime` re-renders

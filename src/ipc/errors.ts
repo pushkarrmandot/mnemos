@@ -28,8 +28,7 @@ export function isAppError(value: unknown): value is AppError {
 
 /**
  * Coerces anything thrown across the IPC boundary into an `AppError`, so UI code
- * can always `switch (error.kind)` and never parse a message string
- * (FRONTEND §3).
+ * can always `switch (error.kind)` and never parse a message string.
  */
 export function normalizeError(value: unknown): AppError {
   if (isAppError(value)) return value;
@@ -65,7 +64,14 @@ export function describeError(error: AppError): string {
     case "model":
       return `model ${error.model} failed [${error.correlation_id}]`;
     case "cancelled":
-      return "operation cancelled";
+      // The variant's internal name follows the worker's own vocabulary
+      // (`CANCELLED`, JSON-RPC -32020), but its one real cause today is a
+      // reverse-RPC timeout, never an actual user-initiated cancel — nothing
+      // in the app exposes a cancel button that could produce this. `message`
+      // (the worker's real reason) is available on `error` but deliberately
+      // not shown here, matching every other variant's convention of a short
+      // fixed phrase rather than a leaked internal string.
+      return "the request timed out";
     case "internal":
       return `internal error [${error.correlation_id}]`;
   }
