@@ -1,8 +1,10 @@
 node_modules/
 dist/
+.tanstack/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store
+Thumbs.db
 *.local
 node_modules/.tmp/
 app-icon.png
@@ -12,3 +14,17 @@ src-python/.pytest_cache/
 src-python/**/*.egg-info/
 src-python/.ruff_cache/
 swift/**/.build/
+
+# Locally-built packaging artifacts (PACKAGING_DESIGN.md section A) — a
+# per-platform Python interpreter + deps, and the Swift sidecar binary.
+# Built by hand today (no CI pipeline yet); regenerated per machine, not
+# something to check in (the Python tree alone runs ~500MB).
+src-tauri/bundled/
+src-tauri/binaries/
+
+# Secrets / local env overrides
+.env
+.env.*
+
+# Log output
+*.log
