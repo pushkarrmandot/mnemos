@@ -9,8 +9,10 @@ Desktop, or anything else that speaks MCP — can search your own meeting histor
 and answer questions grounded in what was actually said, without a transcript
 ever leaving your machine.
 
+[![Download for macOS](https://img.shields.io/badge/Download-macOS%20(Apple%20Silicon)-c4753a?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/pushkarrmandot/mnemos/releases/latest/download/Mnemos_0.1.0_aarch64.dmg)
+
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](#status)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey.svg)](#status)
 
 ---
 
@@ -94,8 +96,22 @@ platform/build picture.
 
 ## Install
 
-No published release builds yet — see [Status](#status). For now, run from
-source.
+**[Download Mnemos for macOS](https://github.com/pushkarrmandot/mnemos/releases/latest/download/Mnemos_0.1.0_aarch64.dmg)** — Apple Silicon, macOS 12 or later.
+
+Open the `.dmg` and drag Mnemos to Applications. The build is signed and
+notarized by Apple, so it opens without a security warning.
+
+On first launch Mnemos downloads a speech model (~2.3 GB) once. After that,
+recording and transcription run entirely on your machine, offline.
+
+You will also need [Claude Code](https://claude.com/claude-code) installed and
+signed in — Mnemos uses it to write summaries. Onboarding checks for it and
+tells you what to do if it is missing.
+
+Windows is not published yet; see [Roadmap](#roadmap).
+
+<details>
+<summary><strong>Run from source instead</strong></summary>
 
 ### Prerequisites
 
@@ -121,12 +137,12 @@ produce summaries — nothing else calls out.
 pnpm tauri build
 ```
 
-Produces an unsigned `.app`/`.dmg` (macOS) or installer (Windows) under
-`src-tauri/target/release/bundle/`. Unsigned means your OS will warn on first
-open — right-click → Open (macOS) or "Run anyway" (Windows SmartScreen) past
-it once. Signed, notarized release builds are what
-[`.github/workflows/release.yml`](.github/workflows/release.yml) produces from
-a tagged release, once one exists.
+Produces an unsigned `.app`/`.dmg` under
+`src-tauri/target/release/bundle/`. Unsigned means macOS warns on first open —
+right-click → Open past it once. The published builds are signed and notarized;
+see [`scripts/build_macos_app.sh`](scripts/build_macos_app.sh).
+
+</details>
 
 ## Checks
 
@@ -169,15 +185,16 @@ Features import from `@/ipc`, never from `bindings/` directly.
 
 ## Status
 
-Early, pre-1.0, single maintainer. macOS is the primary target and what's
-tested day to day; Windows parity work is in progress (native audio capture
-via WASAPI is implemented, but has seen less real-world testing than macOS).
-Linux isn't a target yet — the audio-capture sidecar is Swift/macOS-specific
-and there's no Linux capture path.
+Early, pre-1.0, single maintainer. **macOS on Apple Silicon is the only
+supported platform today** — it is what is built, signed and tested. Windows
+parity work exists in the codebase (native audio capture via WASAPI is
+implemented) but no Windows build is published yet; see [Roadmap](#roadmap).
+Linux isn't a target — the audio-capture sidecar is Swift/macOS-specific and
+there's no Linux capture path.
 
-No signed release builds are published yet — build your own with
-`pnpm tauri build` (see [Install](#install)). Bug reports and PRs are welcome;
-see [CONTRIBUTING.md](CONTRIBUTING.md).
+Signed, notarized macOS builds are published on the
+[releases page](https://github.com/pushkarrmandot/mnemos/releases). Bug reports
+and PRs are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Roadmap
 
