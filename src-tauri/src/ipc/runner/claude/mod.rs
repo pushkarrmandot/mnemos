@@ -40,7 +40,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::error::AppError;
 use crate::ipc::runner::{
     AgentEvent, AgentRunner, AgentStream, ApprovalDecision, ApprovalId, NoticeKind, PromptRequest,
-    RunnerConfig, RunnerMode, StopReason, TurnId, Usage, UserContent,
+    RunnerConfig, RunnerHealth, RunnerMode, StopReason, TurnId, Usage, UserContent,
 };
 use stream::{FrameReader, RawLine};
 
@@ -132,6 +132,16 @@ struct BoundClaudeRunner {
 #[cfg(test)]
 #[async_trait::async_trait]
 impl AgentRunner for BoundClaudeRunner {
+    /// Bound to an explicit binary, so it reports itself usable rather than
+    /// probing auth on a fixture that has none.
+    async fn health(&self) -> RunnerHealth {
+        RunnerHealth::Ready {
+            version: None,
+            account: None,
+            plan: None,
+        }
+    }
+
     async fn start(&mut self, config: RunnerConfig) -> Result<(), AppError> {
         self.runner
             .start_with_binary(self.binary_override.take(), config)
@@ -172,8 +182,81 @@ impl BoundClaudeRunner {
     }
 }
 
+/// The shape of `claude auth status --json`. Only the fields we act on or
+/// display; everything else in that payload (orgId, projectsDirectory,
+/// analytics flags) is deliberately not read.
+#[derive(serde::Deserialize)]
+struct AuthStatus {
+    #[serde(rename = "loggedIn")]
+    logged_in: bool,
+    email: Option<String>,
+    #[serde(rename = "subscriptionType")]
+    subscription_type: Option<String>,
+}
+
+/// Runs `claude auth status --json` and classifies the result.
+///
+/// Bounded: a hung CLI must degrade to `Unknown` rather than stall
+/// onboarding or block a summary indefinitely.
+pub async fn probe_health() -> RunnerHealth {
+    let Some(binary) = spawn::find_claude_binary(None) else {
+        return RunnerHealth::NotInstalled;
+    };
+
+    let mut command = Command::new(&binary);
+    command
+        .args(["auth", "status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(err)) => {
+                return RunnerHealth::Unknown {
+                    detail: format!("could not run {}: {err}", binary.display()),
+                };
+            }
+            Err(_) => {
+                return RunnerHealth::Unknown {
+                    detail: "`claude auth status` did not respond within 10s".to_string(),
+                };
+            }
+        };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<AuthStatus>(stdout.trim()) {
+        Ok(status) if status.logged_in => RunnerHealth::Ready {
+            version: None,
+            account: status.email,
+            plan: status.subscription_type,
+        },
+        Ok(_) => RunnerHealth::NotLoggedIn,
+        Err(_) => {
+            // An older CLI without `auth status`, or output we cannot read.
+            // `Unknown`, never `NotLoggedIn`: sending someone to sign in when
+            // we simply could not tell makes them fix the wrong thing.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let lower = format!("{stdout}{stderr}").to_lowercase();
+            if lower.contains("not logged in") || lower.contains("claude login") {
+                return RunnerHealth::NotLoggedIn;
+            }
+            RunnerHealth::Unknown {
+                detail: truncate(stderr.trim(), 200),
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentRunner for ClaudeRunner {
+    async fn health(&self) -> RunnerHealth {
+        probe_health().await
+    }
+
     async fn start(&mut self, config: RunnerConfig) -> Result<(), AppError> {
         self.start_with_binary(None, config).await
     }
@@ -326,6 +409,55 @@ impl ClaudeRunner {
         binary_override: Option<std::path::PathBuf>,
         config: RunnerConfig,
     ) -> Result<(), AppError> {
+        // Preflight lives here, inside `start`, rather than being something
+        // each caller remembers to do first. Uncached deliberately: `start`
+        // is the cold path only (chat reuses a live process for every
+        // message after the first; a summary runs a handful of times a day),
+        // so a cache would save almost nothing and would spend up to its TTL
+        // telling someone they are signed out immediately after they signed
+        // in — at exactly the moment they retry. Chat and extraction both reach
+        // this line, and anything added later will too — a separate
+        // `check_then_start` protocol is exactly the kind of rule a new
+        // feature forgets, and the symptom would be a turn that dies with no
+        // usable explanation. `health()` stays on the trait for the surfaces
+        // that only want to *display* state.
+        //
+        // Skipped when the caller supplied its own binary: that path is the
+        // test seam, and probing a fixture binary for auth is meaningless.
+        if binary_override.is_none() {
+            match probe_health().await {
+                RunnerHealth::Ready { .. } => {}
+                RunnerHealth::NotInstalled => return Err(spawn::binary_missing_error()),
+                RunnerHealth::NotLoggedIn => {
+                    return Err(AppError::RunnerBlocked {
+                        runner: "claude".to_string(),
+                        resets_at: None,
+                        message: "Claude Code is signed out. Run `claude auth login` \
+                                  in a terminal, then try again."
+                            .to_string(),
+                        correlation_id: crate::error::correlation_id(),
+                    });
+                }
+                RunnerHealth::Blocked { resets_at } => {
+                    return Err(AppError::RunnerBlocked {
+                        runner: "claude".to_string(),
+                        resets_at,
+                        message: "Claude usage limit reached. Your recording and \
+                                  transcript are saved — try again once your limit resets."
+                            .to_string(),
+                        correlation_id: crate::error::correlation_id(),
+                    });
+                }
+                // Never block on a check we could not complete: an
+                // unreachable `auth status` must not stop a runner that
+                // would have worked. The turn's own error path still
+                // reports a real failure if one happens.
+                RunnerHealth::Unknown { detail } => {
+                    tracing::warn!(detail = %detail, "claude.health.indeterminate");
+                }
+            }
+        }
+
         let binary = match binary_override {
             Some(b) => b,
             None => spawn::find_claude_binary(None).ok_or_else(spawn::binary_missing_error)?,
@@ -566,14 +698,10 @@ async fn drain_body(
                 match raw {
                     None => {
                         let (exit_code, stderr_snip) = exit_info(child, stderr_tail).await;
-                        let message = classify_exit(exit_code, &stderr_snip);
+                        let error = error_for_unexpected_exit(exit_code, &stderr_snip).await;
                         let _ = out_tx.send(AgentEvent::Error {
                             turn_id,
-                            error: AppError::Runner {
-                                runner: "claude".to_string(),
-                                message,
-                                correlation_id: crate::error::correlation_id(),
-                            },
+                            error,
                         }).await;
                         return;
                     }
@@ -640,19 +768,39 @@ async fn exit_info(
     (code, truncate(&stderr, 512))
 }
 
-/// Heuristic classification of a process exit with no terminal frame.
-/// The exact "not logged in" marker string is
-/// PROVISIONAL — never exercised against a real logged-out `claude`
-/// install.
-fn classify_exit(exit_code: Option<i32>, stderr_snippet: &str) -> String {
-    let lower = stderr_snippet.to_lowercase();
-    if lower.contains("not logged in")
-        || lower.contains("claude login")
-        || lower.contains("please authenticate")
-    {
-        "cli_not_logged_in".to_string()
-    } else {
-        format!("cli_error: exit_code={exit_code:?} stderr={stderr_snippet}")
+/// Classifies a process exit that produced no terminal frame.
+///
+/// This used to substring-match stderr for "not logged in" / "claude login"
+/// / "please authenticate" and was documented as PROVISIONAL — never
+/// exercised against a real logged-out install. Once `start` gained a real
+/// preflight there were two different mechanisms answering "is it signed
+/// out?", one authoritative and one guessing, which is precisely the drift
+/// that goes stale unnoticed.
+///
+/// So it asks the same check `start` does. A turn can only die this way
+/// *after* a successful preflight, meaning the sign-out happened mid-turn —
+/// rare, and worth one subprocess on an already-failed turn to report
+/// accurately instead of guessing from whatever the CLI last wrote.
+///
+/// `RunnerBlocked` (not `Runner`) is deliberate: extraction maps it to
+/// `-32023`, which `agent_call.py` already treats as non-retryable, so the
+/// no-retry behaviour the old `cli_not_logged_in` marker bought is kept
+/// while the user now gets a message that says what to do.
+async fn error_for_unexpected_exit(exit_code: Option<i32>, stderr_snippet: &str) -> AppError {
+    if matches!(probe_health().await, RunnerHealth::NotLoggedIn) {
+        return AppError::RunnerBlocked {
+            runner: "claude".to_string(),
+            resets_at: None,
+            message: "Claude Code is signed out. Run `claude auth login` in a terminal, \
+                      then try again."
+                .to_string(),
+            correlation_id: crate::error::correlation_id(),
+        };
+    }
+    AppError::Runner {
+        runner: "claude".to_string(),
+        message: format!("cli_error: exit_code={exit_code:?} stderr={stderr_snippet}"),
+        correlation_id: crate::error::correlation_id(),
     }
 }
 
@@ -980,6 +1128,7 @@ cat >/dev/null
         let mut runner = ClaudeRunner::new();
         let dir = tempfile::tempdir().unwrap(); // guaranteed empty, nothing named "claude" in it.
         let old = std::env::var_os("PATH");
+        let _probe_off = crate::ipc::runner::claude::spawn::probe_disabled_for_test();
         unsafe { std::env::set_var("PATH", dir.path()) };
         let result = runner.start(extraction_config("claude-sonnet-5")).await;
         if let Some(old) = old {

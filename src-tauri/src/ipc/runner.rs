@@ -29,9 +29,74 @@ pub type ApprovalId = String;
 
 pub type AgentStream = Pin<Box<dyn Stream<Item = AgentEvent> + Send>>;
 
-/// Six-method shape.
+/// Whether a runner can actually do work right now, as a single value every
+/// runner reports the same way.
+///
+/// Exists because "is the CLI installed" was never the whole question. A
+/// signed-out CLI is installed, on PATH, and completely unable to produce a
+/// summary — and the way that used to surface was a substring search of
+/// stderr after a turn had already died. That guess is gone: the same check
+/// now answers both before a spawn and after an unexpected exit, so there is
+/// one source of truth rather than two that can drift. Claude answers via
+/// `claude auth status --json`; codex will answer it its own way. The
+/// variants are deliberately vendor-neutral so the UI can render one set of
+/// states for any runner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RunnerHealth {
+    Ready {
+        version: Option<String>,
+        /// Shown so a user can tell *which* account is connected. Never
+        /// sent to metrics — the taxonomy carries the state tag only.
+        account: Option<String>,
+        plan: Option<String>,
+    },
+    NotInstalled,
+    NotLoggedIn,
+    /// Usage limit or quota exhaustion — installed and authenticated, just
+    /// refusing work for now.
+    Blocked {
+        resets_at: Option<i64>,
+    },
+    /// The check itself could not be completed (timeout, unparsable output).
+    /// Deliberately distinct from `NotLoggedIn`: telling someone to sign in
+    /// when we simply could not tell sends them to fix the wrong thing.
+    Unknown {
+        detail: String,
+    },
+}
+
+impl RunnerHealth {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, RunnerHealth::Ready { .. })
+    }
+
+    /// The metrics-safe tag. Never carries account, org or version.
+    pub fn state_tag(&self) -> &'static str {
+        match self {
+            RunnerHealth::Ready { .. } => "ready",
+            RunnerHealth::NotInstalled => "not_installed",
+            RunnerHealth::NotLoggedIn => "not_logged_in",
+            RunnerHealth::Blocked { .. } => "blocked",
+            RunnerHealth::Unknown { .. } => "unknown",
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AgentRunner: Send + Sync {
+    /// Whether this runner is usable right now.
+    ///
+    /// `start` already performs this check and fails with the matching
+    /// `AppError`, so no caller has to remember a preflight protocol — a
+    /// feature added later gets the guarantee by calling `start` like
+    /// everything else. This method exists for the surfaces that need to
+    /// *display* the state rather than act on it (onboarding, Settings).
+    async fn health(&self) -> RunnerHealth;
+
+    /// Fails with `NotInstalled`/`NotLoggedIn`/`Blocked` before spawning
+    /// anything, so an unusable runner is reported as itself rather than as
+    /// a turn that mysteriously produced nothing.
     async fn start(&mut self, config: RunnerConfig) -> Result<(), AppError>;
 
     async fn prompt(&mut self, req: PromptRequest) -> Result<AgentStream, AppError>;

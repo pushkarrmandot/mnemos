@@ -1078,6 +1078,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentRunner for NoopRunner {
+        async fn health(&self) -> crate::ipc::runner::RunnerHealth {
+            crate::ipc::runner::RunnerHealth::Ready {
+                version: None,
+                account: None,
+                plan: None,
+            }
+        }
+
         async fn start(&mut self, _config: RunnerConfig) -> Result<(), AppError> {
             Ok(())
         }

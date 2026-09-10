@@ -206,13 +206,6 @@ fn to_rpc_err(err: AppError) -> ReverseRpcError {
                 message: "extraction timed out".to_string(),
                 data: Some(serde_json::json!({"correlation_id": correlation_id})),
             },
-            "cli_not_logged_in" => ReverseRpcError {
-                code: -32000,
-                message: "claude CLI not logged in".to_string(),
-                data: Some(
-                    serde_json::json!({"kind": "cli_not_logged_in", "correlation_id": correlation_id}),
-                ),
-            },
             "stream_corrupt" => ReverseRpcError {
                 code: -32000,
                 message: "claude CLI stream corrupted".to_string(),
@@ -275,6 +268,7 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("PATH");
+        let _probe_off = crate::ipc::runner::claude::spawn::probe_disabled_for_test();
         unsafe { std::env::set_var("PATH", dir.path()) };
         let result = run_extraction("hi".to_string(), "sys".to_string(), 5_000).await;
         if let Some(old) = old {
