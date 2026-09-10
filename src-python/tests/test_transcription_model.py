@@ -1,5 +1,6 @@
 import threading
 import time
+import wave
 
 import pytest
 
@@ -203,3 +204,118 @@ class TestDownloadProgressHook:
             "progress went backwards"
         )
         assert counts[-1] >= real_total * 0.99
+
+
+class TestWavFastPath:
+    """Mnemos records 16 kHz mono 16-bit WAVs, which is exactly what
+    `parakeet-mlx` shells out to ffmpeg to produce — so the subprocess
+    converted the format into itself, and its absence broke every
+    transcription on any Mac without Homebrew. These cover the replacement
+    and, critically, that ffmpeg is no longer required for our own audio.
+    """
+
+    @staticmethod
+    def _write_wav(path, *, channels=1, width=2, rate=16000, frames=1600):
+        import struct
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(width)
+            w.setframerate(rate)
+            w.writeframes(
+                struct.pack("<" + "h" * frames, *range(-frames // 2, frames // 2))
+            )
+
+    def test_decodes_our_own_recording_shape(self, tmp_path):
+        pytest.importorskip("mlx.core")
+        from mnemos_worker.models.transcription import _load_wav_fast
+
+        path = tmp_path / "mic.wav"
+        self._write_wav(path)
+        audio = _load_wav_fast(path, 16000)
+
+        assert audio.shape == (1600,)
+        # float32, NOT the `dtype` default: upstream accepts the argument and
+        # ignores it, always returning float32. Honouring `bfloat16` instead
+        # blew up inside the mel transform — a failure only a real
+        # transcription surfaced.
+        assert str(audio.dtype).endswith("float32")
+
+    def test_ignores_the_dtype_argument_exactly_as_upstream_does(self, tmp_path):
+        mx = pytest.importorskip("mlx.core")
+        from mnemos_worker.models.transcription import _load_wav_fast
+
+        path = tmp_path / "mic.wav"
+        self._write_wav(path)
+
+        assert str(_load_wav_fast(path, 16000, mx.bfloat16).dtype).endswith("float32")
+
+    def test_rejects_anything_that_is_not_our_recording_shape(self, tmp_path):
+        pytest.importorskip("mlx.core")
+        from mnemos_worker.models.transcription import _UnsupportedWav, _load_wav_fast
+
+        stereo = tmp_path / "stereo.wav"
+        self._write_wav(stereo, channels=2)
+        with pytest.raises(_UnsupportedWav):
+            _load_wav_fast(stereo, 16000)
+
+        wrong_rate = tmp_path / "44k.wav"
+        self._write_wav(wrong_rate, rate=44100)
+        with pytest.raises(_UnsupportedWav):
+            _load_wav_fast(wrong_rate, 16000)
+
+    def test_our_audio_decodes_with_ffmpeg_unavailable(self, tmp_path, monkeypatch):
+        """The regression that matters: this must not need ffmpeg.
+
+        `shutil.which` is forced to find nothing, which is the exact condition
+        `parakeet_mlx.audio.load_audio` checks before raising "FFmpeg is not
+        installed or not in your PATH."
+        """
+        pytest.importorskip("mlx.core")
+        from mnemos_worker.models import transcription as T
+
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        path = tmp_path / "mic.wav"
+        self._write_wav(path)
+
+        assert T._load_wav_fast(path, 16000).shape == (1600,)
+
+    def test_install_patches_the_binding_the_library_actually_resolves(self):
+        """`parakeet.py` does `from parakeet_mlx.audio import load_audio`, so
+        it holds its own reference — patching `parakeet_mlx.audio` would do
+        nothing. Same trap that left the download-progress hook dead."""
+        pk = pytest.importorskip("parakeet_mlx.parakeet")
+        from mnemos_worker.models.transcription import (
+            _WAV_FAST_PATH_SENTINEL,
+            install_wav_fast_path,
+        )
+
+        original = pk.load_audio
+        try:
+            assert install_wav_fast_path() is True
+            assert getattr(pk.load_audio, _WAV_FAST_PATH_SENTINEL, False) is True
+            # Idempotent: a second call must not wrap the wrapper.
+            patched = pk.load_audio
+            assert install_wav_fast_path() is True
+            assert pk.load_audio is patched
+        finally:
+            pk.load_audio = original
+
+    def test_unsupported_wav_falls_back_to_the_original_loader(self, tmp_path):
+        """ffmpeg stays the general-purpose decoder — this narrows the
+        dependency to unusual inputs rather than removing the escape hatch."""
+        pk = pytest.importorskip("parakeet_mlx.parakeet")
+        from mnemos_worker.models.transcription import install_wav_fast_path
+
+        original = pk.load_audio
+        called: list[str] = []
+        try:
+            pk.load_audio = lambda *a, **k: called.append("original") or "delegated"
+            install_wav_fast_path()
+
+            stereo = tmp_path / "stereo.wav"
+            self._write_wav(stereo, channels=2)
+            assert pk.load_audio(stereo, 16000) == "delegated"
+            assert called == ["original"]
+        finally:
+            pk.load_audio = original

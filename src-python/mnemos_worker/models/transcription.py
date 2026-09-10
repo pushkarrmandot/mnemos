@@ -345,6 +345,120 @@ def _load_parakeet_weights(from_pretrained: object, model_id: str) -> object:
     return model
 
 
+# ── WAV fast path (removes the ffmpeg dependency on macOS) ──────────────────
+#
+# `parakeet-mlx` decodes audio by shelling out to `ffmpeg`
+# (`parakeet_mlx/audio.py::load_audio`, which raises "FFmpeg is not installed
+# or not in your PATH." when `shutil.which` misses). ffmpeg is a *native*
+# binary, not a Python package, so bundling the interpreter does not ship it:
+# the app worked on every machine that happened to have Homebrew and failed on
+# a clean one, where neither live nor final transcription ran at all.
+#
+# We do not need it. Every WAV Mnemos records is already 16 kHz mono 16-bit —
+# the exact format `load_audio` asks ffmpeg to convert *to* — so the subprocess
+# converts s16le@16k mono into s16le@16k mono. Decoding with the standard
+# library instead is byte-identical (verified sample-for-sample against
+# ffmpeg's output on real recordings) and ~100x faster, which also removes a
+# process spawn from every live-transcription tick.
+#
+# ffmpeg stays as the fallback for anything that is not that exact format, so
+# an unexpected input still works wherever ffmpeg exists — this narrows the
+# dependency rather than trading one hard requirement for another.
+#
+# macOS only: Windows uses `onnx_asr`, which has its own reader and never
+# calls `parakeet_mlx`. `install_wav_fast_path` is a no-op there, and the
+# branch is left explicit so a Windows equivalent can be added if it ever
+# needs one.
+
+_WAV_FAST_PATH_SENTINEL = "_mnemos_wav_fast_path"
+
+
+def _load_wav_fast(filename: Any, sampling_rate: int, dtype: Any = None) -> Any:
+    """Drop-in for `parakeet_mlx.audio.load_audio`, for our own WAVs.
+
+    Returns float32 in [-1, 1) and deliberately IGNORES `dtype`, because the
+    upstream does: it accepts the argument and then always returns
+    `.astype(mx.float32) / 32768.0`. Honouring the documented default
+    (`bfloat16`) instead produced a shape error deep inside the mel transform
+    — caught only by running a real transcription, which is why that check is
+    now a test.
+    """
+    import mlx.core as mx  # local: keeps module import cheap on non-mac
+    import numpy as np
+
+    del dtype  # see docstring — upstream ignores it too
+
+    with wave.open(str(filename), "rb") as src:
+        params = (src.getnchannels(), src.getsampwidth(), src.getframerate())
+        if params != (1, 2, sampling_rate):
+            raise _UnsupportedWav(f"channels/width/rate = {params}")
+        pcm = src.readframes(src.getnframes())
+
+    return mx.array(np.frombuffer(pcm, np.int16).flatten()).astype(mx.float32) / 32768.0
+
+
+class _UnsupportedWav(Exception):
+    """Not the 16 kHz mono 16-bit PCM we record — fall back to ffmpeg."""
+
+
+def install_wav_fast_path() -> bool:
+    """Point `parakeet_mlx` at `_load_wav_fast`, keeping ffmpeg as fallback.
+
+    Patches the binding inside `parakeet_mlx.parakeet`, NOT
+    `parakeet_mlx.audio`: `parakeet.py` does `from parakeet_mlx.audio import
+    ... load_audio`, so it holds its own reference and patching the source
+    module would have no effect at all. (The download-progress hook in this
+    file was broken for exactly that class of reason; here it is deliberate.)
+
+    Returns whether the patch is in place, so the caller can log it rather
+    than assume — a silently absent patch would simply reintroduce the
+    ffmpeg requirement.
+    """
+    if platform.system() != "Darwin":
+        return False  # Windows/onnx_asr does not use this loader
+    try:
+        import parakeet_mlx.parakeet as pk
+    except Exception as exc:  # noqa: BLE001 — never block model load
+        log.warning("parakeet.wav_fast_path.unavailable", error=str(exc))
+        return False
+
+    if getattr(pk.load_audio, _WAV_FAST_PATH_SENTINEL, False):
+        return True
+
+    original = pk.load_audio
+
+    def load_audio(filename: Any, sampling_rate: int, dtype: Any = None) -> Any:
+        try:
+            audio = _load_wav_fast(filename, sampling_rate, dtype)
+        except (_UnsupportedWav, wave.Error, OSError) as exc:
+            # Anything not our own recording shape: hand back to ffmpeg,
+            # which is still the only general-purpose decoder we have.
+            log.info("parakeet.audio_decoder", used="ffmpeg", reason=str(exc))
+            return original(filename, sampling_rate)
+        _log_decoder_once("wav_fast_path")
+        return audio
+
+    setattr(load_audio, _WAV_FAST_PATH_SENTINEL, True)
+    pk.load_audio = load_audio
+    return True
+
+
+_decoder_logged = False
+
+
+def _log_decoder_once(used: str) -> None:
+    """One line per process naming the decoder actually in use.
+
+    Deliberately not per call — a live recording decodes every few seconds.
+    Without this, "does this build still need ffmpeg?" is unanswerable from a
+    user's log, which is precisely how the dependency went unnoticed.
+    """
+    global _decoder_logged
+    if not _decoder_logged:
+        _decoder_logged = True
+        log.info("parakeet.audio_decoder", used=used)
+
+
 class _ParakeetMlxBackend:
     """`parakeet-mlx`'s real API, verified against the installed package.
     Model id is the v1 pin (matches Parakeet TDT 0.6B v3's expected input
@@ -369,6 +483,13 @@ class _ParakeetMlxBackend:
 
     def __init__(self) -> None:
         from parakeet_mlx import from_pretrained  # type: ignore[import-not-found]
+
+        # Before the model loads, so the very first decode already avoids
+        # ffmpeg. Logged either way: a build that quietly reverted to
+        # requiring ffmpeg would otherwise look identical in the logs right
+        # up until it failed on a machine without it.
+        installed = install_wav_fast_path()
+        log.info("parakeet.wav_fast_path", installed=installed)
 
         self._model = _load_parakeet_weights(from_pretrained, self.MODEL_ID)
 
