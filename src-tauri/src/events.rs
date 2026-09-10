@@ -99,6 +99,15 @@ pub struct ProcessingProgress {
     pub step: String,
     pub status: String,
     pub pct: Option<f64>,
+    /// Why it failed, in words meant for the user — `None` for every status
+    /// other than `failed`.
+    ///
+    /// Without this the UI could only say "Processing failed during
+    /// extracting", while the actual cause ("Claude Code is signed out. Run
+    /// `claude auth login`…") sat in the database and the log file. The
+    /// message is already written to `pipeline_step`, so a reload recovers
+    /// it; this carries it live.
+    pub error: Option<String>,
 }
 
 /// A project's memory auto/manual-refresh (see [`ProjectMemoryUpdated`])

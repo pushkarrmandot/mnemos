@@ -211,8 +211,8 @@ function ConversationRoute() {
     return (
       <EmptyState
         body={
-          detail.data.pipeline_error
-            ? `${detail.data.pipeline_error} Your recording and transcript are still on disk.`
+          (state.error ?? detail.data.pipeline_error)
+            ? `${state.error ?? detail.data.pipeline_error} Your recording and transcript are still on disk.`
             : `Processing failed during ${state.step}. Your recording and transcript are still on disk.`
         }
         cta={{
@@ -278,7 +278,7 @@ function ConversationRoute() {
       {state.kind === "failed" && hasAnyContent && !bannerDismissed ? (
         <div className="flex items-center justify-between gap-3 border-subtle border-b bg-danger-bg px-8 py-3">
           <p className="type-body text-primary">
-            {detail.data.pipeline_error ?? `Processing failed during ${state.step}.`}
+            {state.error ?? detail.data.pipeline_error ?? `Processing failed during ${state.step}.`}
           </p>
           <div className="flex items-center gap-1">
             <Button

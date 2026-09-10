@@ -289,6 +289,15 @@ fn session_not_found(session_id: u32) -> AppError {
 /// which is honest; the previous hardcoded 0.05/0.6/0.8 milestones looked
 /// like measurements and were not. Only `transcribing` reports a real
 /// fraction, fed from the worker's per-chunk `job_progress` reports.
+/// The terminal "this conversation finished processing" progress event.
+///
+/// Shared with `conversation_retry_step` so a recovered conversation emits
+/// the identical signal a first-time success does — one definition, so the
+/// two cannot drift into meaning subtly different things.
+pub(crate) fn emit_pipeline_done(app: &AppHandle, conversation_id: &str) {
+    emit_progress(app, conversation_id, "done", "done", None);
+}
+
 fn emit_progress(
     app: &AppHandle,
     conversation_id: &str,
@@ -296,11 +305,23 @@ fn emit_progress(
     status: &str,
     pct: Option<f64>,
 ) {
+    emit_progress_with_error(app, conversation_id, step, status, pct, None);
+}
+
+fn emit_progress_with_error(
+    app: &AppHandle,
+    conversation_id: &str,
+    step: &str,
+    status: &str,
+    pct: Option<f64>,
+    error: Option<String>,
+) {
     let _ = crate::events::ProcessingProgress {
         conversation_id: conversation_id.to_string(),
         step: step.to_string(),
         status: status.to_string(),
         pct,
+        error,
     }
     .emit(app);
 }
@@ -1435,13 +1456,13 @@ async fn fail_pipeline(app: &AppHandle, conv_id: &str, step: &str, err: &AppErro
     );
     let _ = state
         .storage
-        .set_pipeline_step(conv_id, PipelineStep::Failed, Some(message))
+        .set_pipeline_step(conv_id, PipelineStep::Failed, Some(message.clone()))
         .await;
     let _ = state
         .storage
         .update_conversation_status(conv_id, ConversationStatus::Failed, None, None)
         .await;
-    emit_progress(app, conv_id, step, "failed", None);
+    emit_progress_with_error(app, conv_id, step, "failed", None, Some(message));
 }
 
 /// Crash recovery (12_CORNER_CASES.md "App crashes & recovery" §Mid-recording

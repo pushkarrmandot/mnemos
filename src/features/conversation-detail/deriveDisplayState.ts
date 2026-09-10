@@ -4,7 +4,11 @@ export type DisplayState =
   | { kind: "recording" }
   | { kind: "processing"; step: string }
   | { kind: "done" }
-  | { kind: "failed"; step: string };
+  /** `error` is the live, user-facing reason from the failure event — e.g.
+   * "Claude Code is signed out. Run `claude auth login`…". `null` when the
+   * failure is known only from the DB-backed `pipeline_step`, in which case
+   * the route falls back to the conversation's stored `pipeline_error`. */
+  | { kind: "failed"; step: string; error: string | null };
 
 /**
  * Combines the DB-backed `conversation.status`, the event-driven live
@@ -55,13 +59,15 @@ export type DisplayState =
 export function deriveDisplayState(
   status: ConversationStatus | undefined,
   pipelineStep: string | null | undefined,
-  live: { step: string; status: string } | undefined,
+  live: { step: string; status: string; error?: string | null } | undefined,
 ): DisplayState {
   if (status === "recording" && !live && pipelineStep == null) return { kind: "recording" };
   if (pipelineStep === "done") return { kind: "done" };
-  if (pipelineStep === "failed") return { kind: "failed", step: "extracting" };
+  if (pipelineStep === "failed")
+    return { kind: "failed", step: "extracting", error: live?.error ?? null };
   if (live) {
-    if (live.status === "failed") return { kind: "failed", step: live.step };
+    if (live.status === "failed")
+      return { kind: "failed", step: live.step, error: live.error ?? null };
     if (live.step === "done" && live.status === "done") return { kind: "done" };
     return { kind: "processing", step: live.step };
   }

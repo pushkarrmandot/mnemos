@@ -120,6 +120,7 @@ describe("/_app/conversation/$conversationId route", () => {
       step: "extracting",
       status: "failed",
       pct: null,
+      error: null,
     });
 
     await waitFor(() =>

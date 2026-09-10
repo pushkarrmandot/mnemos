@@ -41,12 +41,19 @@ type ConversationPipelineState = {
   /** `null` for steps with nothing measurable to report — see
    * `EventPayloads["processingProgress"]`'s own doc comment. */
   pct: number | null;
+  /** Why it failed, in words meant for the user; `null` unless `status` is
+   * `failed`. The backend has always known this — a signed-out runner
+   * produces "Claude Code is signed out. Run `claude auth login`…" — but the
+   * event dropped it, so every cause rendered as the same generic
+   * "Processing failed during <step>" and nobody could act on it. */
+  error: string | null;
 
   setProgress: (payload: {
     conversation_id: string;
     step: string;
     status: "running" | "done" | "failed";
     pct: number | null;
+    error: string | null;
   }) => void;
   /** Called once, from the same `conversationReady` handler that resets
    * `useRecordingStore` — see `useTauriEventBridge.ts`. Guarded there the
@@ -61,6 +68,7 @@ export const useConversationPipelineStore = create<ConversationPipelineState>()(
   step: null,
   status: null,
   pct: null,
+  error: null,
 
   setProgress: (payload) =>
     set({
@@ -68,15 +76,17 @@ export const useConversationPipelineStore = create<ConversationPipelineState>()(
       step: payload.step,
       status: payload.status,
       pct: payload.pct,
+      error: payload.error ?? null,
     }),
 
-  reset: () => set({ conversationId: null, step: null, status: null, pct: null }),
+  reset: () => set({ conversationId: null, step: null, status: null, pct: null, error: null }),
 }));
 
 /** What `ProcessingOverlay` and `deriveDisplayState` actually consume — the
  * conversation id is the lookup key, not part of the answer. */
 export type ConversationPipelineProgress = {
   step: string;
+  error: string | null;
   status: "running" | "done" | "failed";
   pct: number | null;
 };
@@ -108,11 +118,12 @@ export function useConversationPipelineProgress(
   const step = useConversationPipelineStore((s) => s.step);
   const status = useConversationPipelineStore((s) => s.status);
   const pct = useConversationPipelineStore((s) => s.pct);
+  const error = useConversationPipelineStore((s) => s.error);
 
   return useMemo(() => {
     if (slotConversationId !== conversationId || step === null || status === null) {
       return undefined;
     }
-    return { step, status, pct };
-  }, [slotConversationId, conversationId, step, status, pct]);
+    return { step, status, pct, error };
+  }, [slotConversationId, conversationId, step, status, pct, error]);
 }

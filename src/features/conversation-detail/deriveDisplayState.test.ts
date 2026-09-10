@@ -24,6 +24,7 @@ describe("deriveDisplayState", () => {
     expect(deriveDisplayState("failed", "failed", undefined)).toEqual({
       kind: "failed",
       step: "extracting",
+      error: null,
     });
   });
 
@@ -48,6 +49,27 @@ describe("deriveDisplayState", () => {
     ).toEqual({
       kind: "failed",
       step: "extracting",
+      error: null,
+    });
+  });
+
+  it("carries the live failure reason so the UI need not invent a generic one", () => {
+    // Signing out of Claude and recording produced "Processing failed during
+    // extracting" on screen, while the real cause — "Claude Code is signed
+    // out. Run `claude auth login`…" — sat in the database and the log. The
+    // conversation query has not refetched at the moment a live failure
+    // lands, so `pipeline_error` is still null exactly when it is needed;
+    // the reason has to travel on the event.
+    expect(
+      deriveDisplayState("processing", null, {
+        step: "extracting",
+        status: "failed",
+        error: "Claude Code is signed out. Run `claude auth login` in a terminal, then try again.",
+      }),
+    ).toEqual({
+      kind: "failed",
+      step: "extracting",
+      error: "Claude Code is signed out. Run `claude auth login` in a terminal, then try again.",
     });
   });
 
@@ -103,6 +125,6 @@ describe("deriveDisplayState", () => {
     // reached "done"), but the rule is symmetric and should stay that way.
     expect(
       deriveDisplayState("failed", "failed", { step: "extracting", status: "running" }),
-    ).toEqual({ kind: "failed", step: "extracting" });
+    ).toEqual({ kind: "failed", step: "extracting", error: null });
   });
 });

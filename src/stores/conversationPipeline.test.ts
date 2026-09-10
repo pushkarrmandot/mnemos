@@ -27,6 +27,7 @@ describe("useConversationPipelineStore", () => {
       step: "transcribing",
       status: "running",
       pct: 0.4,
+      error: null,
     });
 
     expect(useConversationPipelineStore.getState()).toMatchObject({
@@ -46,12 +47,14 @@ describe("useConversationPipelineStore", () => {
       step: "extracting",
       status: "running",
       pct: null,
+      error: null,
     });
     store.setProgress({
       conversation_id: "conv-2",
       step: "finalizing",
       status: "running",
       pct: null,
+      error: null,
     });
 
     expect(useConversationPipelineStore.getState().conversationId).toBe("conv-2");
@@ -59,9 +62,13 @@ describe("useConversationPipelineStore", () => {
   });
 
   it("reset clears the slot", () => {
-    useConversationPipelineStore
-      .getState()
-      .setProgress({ conversation_id: "conv-1", step: "done", status: "done", pct: null });
+    useConversationPipelineStore.getState().setProgress({
+      conversation_id: "conv-1",
+      step: "done",
+      status: "done",
+      pct: null,
+      error: null,
+    });
 
     useConversationPipelineStore.getState().reset();
 
@@ -78,9 +85,13 @@ describe("useConversationPipelineProgress", () => {
   });
 
   it("is undefined for a conversation the slot doesn't belong to", () => {
-    useConversationPipelineStore
-      .getState()
-      .setProgress({ conversation_id: "conv-1", step: "extracting", status: "running", pct: null });
+    useConversationPipelineStore.getState().setProgress({
+      conversation_id: "conv-1",
+      step: "extracting",
+      status: "running",
+      pct: null,
+      error: null,
+    });
 
     const { result } = renderHook(() => useConversationPipelineProgress("conv-2"));
     expect(result.current).toBeUndefined();
@@ -92,10 +103,16 @@ describe("useConversationPipelineProgress", () => {
       step: "extracting",
       status: "running",
       pct: null,
+      error: null,
     });
 
     const { result } = renderHook(() => useConversationPipelineProgress("conv-1"));
-    expect(result.current).toEqual({ step: "extracting", status: "running", pct: null });
+    expect(result.current).toEqual({
+      step: "extracting",
+      status: "running",
+      pct: null,
+      error: null,
+    });
   });
 
   it("switches from undefined to a value as the slot changes ownership underneath it", () => {
@@ -104,11 +121,20 @@ describe("useConversationPipelineProgress", () => {
     });
     expect(result.current).toBeUndefined();
 
-    useConversationPipelineStore
-      .getState()
-      .setProgress({ conversation_id: "conv-1", step: "finalizing", status: "running", pct: null });
+    useConversationPipelineStore.getState().setProgress({
+      conversation_id: "conv-1",
+      step: "finalizing",
+      status: "running",
+      pct: null,
+      error: null,
+    });
     rerender({ id: "conv-1" });
 
-    expect(result.current).toEqual({ step: "finalizing", status: "running", pct: null });
+    expect(result.current).toEqual({
+      step: "finalizing",
+      status: "running",
+      pct: null,
+      error: null,
+    });
   });
 });
