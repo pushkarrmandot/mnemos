@@ -80,15 +80,15 @@ export function useTauriEventBridge(): void {
         // A new conversation has landed — every cached search result is stale.
         queryClient.invalidateQueries({ queryKey: ["search"] });
 
-        // Only the session this event belongs to may reset the store. A late
-        // event for a prior recording must not clobber the current one — the
-        // re-entrant arm guard depends on this check.
-        const recording = useRecordingStore.getState();
-        if (recording.state === "transcribing" && recording.conversationId === conversationId) {
-          recording.reset();
-        }
-        // Same guard, same reason, for the live-progress slot the pipeline
-        // just finished with — see `stores/conversationPipeline.ts`.
+        // The recording store is deliberately NOT reset here any more: the
+        // `processingProgress` handler above owns that, and covers failure
+        // as well as success. `recording.rs` emits the terminal progress
+        // event immediately before this one, so nothing is lost by dropping
+        // the duplicate — and one rule cannot disagree with itself.
+        //
+        // The live-progress slot is still cleared here, because that is
+        // genuinely about data having landed: a failed run keeps its entry
+        // so the conversation page can render why.
         const pipeline = useConversationPipelineStore.getState();
         if (pipeline.conversationId === conversationId) {
           pipeline.reset();
@@ -103,6 +103,33 @@ export function useTauriEventBridge(): void {
         // content immediately instead of waiting for the final `conversationReady`.
         if (payload.status === "done") {
           queryClient.invalidateQueries({ queryKey: qk.conversation(payload.conversation_id) });
+        }
+
+        // The recording store leaves "transcribing" when the pipeline it is
+        // waiting on reaches a terminal status — either one. This is the
+        // single place that decides that.
+        //
+        // It used to hang off `conversationReady`, which the backend emits
+        // only on success, so a failed pipeline left the store parked in
+        // "transcribing" forever: `useRequestStartRecording` gates on exactly
+        // that state, so every Record click asked "Start a new recording?
+        // The previous conversation will finish processing in the
+        // background" until the app was relaunched. Retrying did not help
+        // either — retry writes the DB but the store never heard.
+        //
+        // `processingProgress` is the right signal because it reports every
+        // terminal outcome, not just the happy one. `conversationReady`
+        // keeps its own job (cache invalidation once data has landed).
+        //
+        // Note the asymmetry with the pipeline slot below: capture is over
+        // either way, but a *failed* run must keep its progress entry,
+        // because that is where the conversation page reads the reason to
+        // show. Only success clears it.
+        if (payload.status === "done" || payload.status === "failed") {
+          const recording = useRecordingStore.getState();
+          if (recording.conversationId === payload.conversation_id) {
+            recording.reset();
+          }
         }
       }),
 

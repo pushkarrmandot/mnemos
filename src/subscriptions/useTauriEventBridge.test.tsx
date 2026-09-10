@@ -67,6 +67,11 @@ describe("useTauriEventBridge", () => {
   });
 
   it("resets the recording store only for the transcribing conversation", () => {
+    // The release moved off `conversationReady` and onto the terminal
+    // progress event: `conversationReady` fires only on success, so hanging
+    // lifecycle on it left a failed pipeline stuck in "transcribing"
+    // forever. The ownership guard this test exists for is unchanged — a
+    // late event for another conversation must never touch this store.
     renderHook(() => useTauriEventBridge());
 
     const store = useRecordingStore.getState();
@@ -76,11 +81,18 @@ describe("useTauriEventBridge", () => {
     store.markFinalizing();
     store.markTranscribing();
 
-    // A late event for a *different* conversation must not touch the store.
-    emit("conversationReady", { conversation_id: "conv-other", project_id: "proj-1" });
+    // `conversationReady` alone no longer releases it — that duplicate is
+    // gone, so the two rules cannot disagree.
+    emit("conversationReady", { conversation_id: "conv-1", project_id: "proj-1" });
     expect(useRecordingStore.getState().state).toBe("transcribing");
 
-    emit("conversationReady", { conversation_id: "conv-1", project_id: "proj-1" });
+    const terminal = { step: "done", status: "done" as const, pct: null, error: null };
+
+    // A terminal event for a *different* conversation must not touch it.
+    emit("processingProgress", { conversation_id: "conv-other", ...terminal });
+    expect(useRecordingStore.getState().state).toBe("transcribing");
+
+    emit("processingProgress", { conversation_id: "conv-1", ...terminal });
     expect(useRecordingStore.getState().state).toBe("idle");
   });
 
@@ -134,6 +146,7 @@ describe("useTauriEventBridge", () => {
       step: "diarize",
       status: "running" as const,
       pct: 40,
+      error: null,
     };
 
     emit("processingProgress", payload);
@@ -146,6 +159,87 @@ describe("useTauriEventBridge", () => {
     });
   });
 
+  it("releases the recording store when the pipeline finishes successfully", () => {
+    // Previously this rode on `conversationReady`. It now rides on the
+    // terminal progress event, which the backend emits immediately before —
+    // so success must keep working through the new route.
+    useRecordingStore.setState({ state: "transcribing", conversationId: "conv-1" });
+    renderHook(() => useTauriEventBridge());
+
+    emit("processingProgress", {
+      conversation_id: "conv-1",
+      step: "done",
+      status: "done" as const,
+      pct: null,
+      error: null,
+    });
+
+    expect(useRecordingStore.getState().state).toBe("idle");
+  });
+
+  it("keeps the failure reason in the progress slot while releasing the recording", () => {
+    // The asymmetry that makes this one rule rather than two: capture is over
+    // either way, but the conversation page reads the reason out of the
+    // progress slot, so a failed run must keep its entry.
+    useRecordingStore.setState({ state: "transcribing", conversationId: "conv-1" });
+    renderHook(() => useTauriEventBridge());
+
+    emit("processingProgress", {
+      conversation_id: "conv-1",
+      step: "extracting",
+      status: "failed" as const,
+      pct: null,
+      error: "Claude Code is signed out.",
+    });
+
+    expect(useRecordingStore.getState().state).toBe("idle");
+    expect(useConversationPipelineStore.getState()).toMatchObject({
+      conversationId: "conv-1",
+      status: "failed",
+      error: "Claude Code is signed out.",
+    });
+  });
+
+  it("releases the recording store when the pipeline fails, so Record stops prompting", () => {
+    // A failed pipeline is terminal, but `recording.reset()` only ran on
+    // `conversationReady` and on backend teardown — neither of which fires
+    // on failure. The store stayed in "transcribing", and
+    // `useRequestStartRecording` gates on exactly that, so every Record
+    // click asked "Start a new recording? The previous conversation will
+    // finish processing in the background" until the app was relaunched.
+    // Retrying the summary did not help: `regenerate` emits no
+    // `conversationReady`.
+    useRecordingStore.setState({ state: "transcribing", conversationId: "conv-1" });
+    renderHook(() => useTauriEventBridge());
+
+    emit("processingProgress", {
+      conversation_id: "conv-1",
+      step: "extracting",
+      status: "failed" as const,
+      pct: null,
+      error: "Claude Code is signed out.",
+    });
+
+    expect(useRecordingStore.getState().state).toBe("idle");
+  });
+
+  it("leaves a different conversation's recording alone when one fails", () => {
+    // The same guard the other two reset sites use: a late failure for an
+    // already-superseded conversation must not tear down a live recording.
+    useRecordingStore.setState({ state: "transcribing", conversationId: "conv-live" });
+    renderHook(() => useTauriEventBridge());
+
+    emit("processingProgress", {
+      conversation_id: "conv-other",
+      step: "extracting",
+      status: "failed" as const,
+      pct: null,
+      error: "boom",
+    });
+
+    expect(useRecordingStore.getState().state).toBe("transcribing");
+  });
+
   it("clears the live-progress slot on conversationReady, for the conversation it belongs to", () => {
     renderHook(() => useTauriEventBridge());
     useConversationPipelineStore.getState().setProgress({
@@ -153,6 +247,7 @@ describe("useTauriEventBridge", () => {
       step: "extracting",
       status: "running",
       pct: null,
+      error: null,
     });
 
     emit("conversationReady", { conversation_id: "conv-1", project_id: null });
@@ -167,6 +262,7 @@ describe("useTauriEventBridge", () => {
       step: "extracting",
       status: "running",
       pct: null,
+      error: null,
     });
 
     emit("conversationReady", { conversation_id: "conv-1", project_id: null });

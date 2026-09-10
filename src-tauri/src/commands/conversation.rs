@@ -701,6 +701,23 @@ pub async fn conversation_retry_step(
             .await?;
     }
 
+    // A successful retry has to look exactly like a successful first run.
+    //
+    // This used to write `PipelineStep::Done` and `ConversationStatus::Ready`
+    // to the database and emit nothing at all, so every listener kept the
+    // state it had at the moment of failure: the recording store stayed in
+    // "transcribing", the progress slot kept its failure entry, and other
+    // windows never learned. The summary only appeared because the caller
+    // invalidated its own query afterwards. Emitting the same pair the
+    // pipeline's own success path emits (`recording.rs`'s tail) means
+    // recovery travels the ordinary route instead of a private one.
+    crate::commands::recording::emit_pipeline_done(&app, &conversation_id);
+    let _ = crate::events::ConversationReady {
+        conversation_id: conversation_id.clone(),
+        project_id: conversation.project_id.clone(),
+    }
+    .emit(&app);
+
     Ok(RegenerateOutcome {
         summary_written: outcome.summary_written,
     })
