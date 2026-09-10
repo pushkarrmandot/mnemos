@@ -1060,6 +1060,29 @@ async runnerGetClaudePath() : Promise<Result<string | null, AppError>> {
  */
 async runnerHealth() : Promise<RunnerHealth> {
     return await TAURI_INVOKE("runner_health");
+},
+/**
+ * Writes a conversation's Markdown export to the user's Downloads folder and
+ * returns the path it landed at.
+ * 
+ * Downloads rather than a Save-As dialog: a native file dialog needs a Tauri
+ * plugin this app does not install, and the export is one predictable file
+ * with an obvious name — so the dialog would mostly be a step between the
+ * user and the thing they asked for. `tauri-plugin-opener`, already a
+ * dependency, reveals it afterwards so it is never "saved somewhere".
+ * 
+ * The Markdown is built and passed in by the caller rather than assembled
+ * here, so the file is byte-identical to what "Copy as Markdown" puts on the
+ * clipboard — two renderings of the same conversation that could disagree is
+ * exactly the drift worth designing out.
+ */
+async conversationExportMarkdown(title: string, markdown: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("conversation_export_markdown", { title, markdown }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 

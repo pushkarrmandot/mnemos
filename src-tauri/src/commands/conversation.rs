@@ -747,3 +747,121 @@ mod validate_name_tests {
         assert!(validate_name(&"a".repeat(201), 200, "title").is_err());
     }
 }
+
+/// Writes a conversation's Markdown export to the user's Downloads folder and
+/// returns the path it landed at.
+///
+/// Downloads rather than a Save-As dialog: a native file dialog needs a Tauri
+/// plugin this app does not install, and the export is one predictable file
+/// with an obvious name — so the dialog would mostly be a step between the
+/// user and the thing they asked for. `tauri-plugin-opener`, already a
+/// dependency, reveals it afterwards so it is never "saved somewhere".
+///
+/// The Markdown is built and passed in by the caller rather than assembled
+/// here, so the file is byte-identical to what "Copy as Markdown" puts on the
+/// clipboard — two renderings of the same conversation that could disagree is
+/// exactly the drift worth designing out.
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_export_markdown(
+    title: String,
+    markdown: String,
+) -> Result<String, AppError> {
+    let dir = downloads_dir()?;
+    std::fs::create_dir_all(&dir)?;
+
+    let stem = filename_stem(&title);
+    let mut path = dir.join(format!("{stem}.md"));
+    // Exporting the same meeting twice should not silently overwrite the
+    // first file — someone may have already edited it.
+    for suffix in 2..100 {
+        if !path.exists() {
+            break;
+        }
+        path = dir.join(format!("{stem} {suffix}.md"));
+    }
+
+    std::fs::write(&path, markdown)?;
+
+    // Revealing it is the caller's call, offered as an action on the success
+    // toast — an export that yanks Finder to the front unasked is worse than
+    // one that tells you where the file went and lets you decide.
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn downloads_dir() -> Result<std::path::PathBuf, AppError> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| AppError::internal("no home directory"))?;
+    Ok(home.join("Downloads"))
+}
+
+/// A conversation title is free text a user can type anything into, and it
+/// becomes a filename here — so path separators, control characters and the
+/// characters Windows reserves are stripped rather than escaped, and the
+/// result can never climb out of Downloads.
+fn filename_stem(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Drop dot-only tokens outright rather than trimming the ends: "../../x"
+    // collapses to ".. .. x", and trimming only removes the first run, so a
+    // second ".." survived into the filename. Nothing is traversable either
+    // way (separators are already gone), but a file called ".. etc passwd.md"
+    // is not something to hand a user.
+    let collapsed = cleaned
+        .split_whitespace()
+        .filter(|token| !token.chars().all(|c| c == '.'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed: String = collapsed.chars().take(80).collect();
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() {
+        "Conversation".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod export_filename_tests {
+    use super::filename_stem;
+
+    #[test]
+    fn a_title_cannot_escape_the_downloads_folder() {
+        // The title is free text; without this it is a path.
+        assert_eq!(filename_stem("../../etc/passwd"), "etc passwd");
+        assert_eq!(filename_stem("a/b\\c"), "a b c");
+    }
+
+    #[test]
+    fn strips_characters_windows_refuses() {
+        assert_eq!(
+            filename_stem(r#"Q3: plan? "final" <v2>"#),
+            "Q3 plan _final_ _v2_".replace('_', "")
+        );
+    }
+
+    #[test]
+    fn falls_back_when_nothing_usable_is_left() {
+        assert_eq!(filename_stem("///"), "Conversation");
+        assert_eq!(filename_stem("   "), "Conversation");
+        assert_eq!(filename_stem("..."), "Conversation");
+    }
+
+    #[test]
+    fn keeps_ordinary_titles_readable() {
+        assert_eq!(
+            filename_stem("Pricing review with Acme"),
+            "Pricing review with Acme"
+        );
+    }
+}

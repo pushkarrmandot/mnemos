@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import {
   CheckSquare,
@@ -15,6 +16,19 @@ import { EmptyState } from "@/components/app/EmptyState";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LiveTranscriptList } from "@/features/active-conversation/LiveTranscriptList";
 import { CopyButton } from "@/features/conversation-detail/CopyButton";
+import { buildConversationMarkdown } from "@/features/conversation-detail/conversationMarkdown";
+import { commands } from "@/ipc/client";
+import { qk } from "@/queries/keys";
+
+/** Same shape the header shows, so a pasted summary and the page agree. */
+function formatExportDate(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 import { DetailHeader } from "@/features/conversation-detail/DetailHeader";
 import { deriveDisplayState } from "@/features/conversation-detail/deriveDisplayState";
 import {
@@ -92,6 +106,12 @@ function ConversationRoute() {
   // `live` above is already the plain value (or `undefined`) now — a store
   // selector, not a `useQuery` result — so nothing here reads `.data`.
   const regenerate = useRegenerateSummary(conversationId);
+  const onboardingStatus = useQuery({
+    queryFn: () => commands.onboarding.getStatus(),
+    queryKey: qk.onboardingStatus(),
+  });
+  const selfName = onboardingStatus.data?.user_first_name?.trim() || null;
+
   const setOpenQuestionOwner = useSetOpenQuestionOwner(conversationId);
   const setOpenQuestionResolved = useSetOpenQuestionResolved(conversationId);
   const deleteItem = useDeleteExtractionItem(conversationId);
@@ -234,18 +254,27 @@ function ConversationRoute() {
         .map((t) => `[${formatMmSs(t.ts_start_ms)}] ${t.speaker_label}: ${t.text}`)
         .join("\n")
     : "";
-  // Overflow menu's "Copy as Markdown" — `null` until there's at least a
-  // summary or a transcript to copy (matches `CopyButton`'s own gating).
-  const overflowMarkdown =
-    summary_markdown || transcript
-      ? [
-          `# ${conversation.title}`,
-          summary_markdown ? `## Summary\n\n${summary_markdown}` : null,
-          transcript ? `## Transcript\n\n${transcriptText}` : null,
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      : null;
+  // Overflow menu's "Copy as Markdown" — the shareable form of this meeting:
+  // summary, decisions, action items and open questions, which is what the
+  // Summary tab shows. The transcript is deliberately not here; it has its
+  // own Copy button on its own tab, and folding hundreds of turns into a
+  // pasted summary buries the decisions that were the reason to share it.
+  //
+  // Built from page state, so an assignee the user corrected is what gets
+  // exported (`useSetActionItemAssignee` writes into this same query cache),
+  // rather than the model's original guess in the extraction payload.
+  const overflowMarkdown = buildConversationMarkdown({
+    title: conversation.title,
+    dateLabel: formatExportDate(conversation.started_at),
+    durationLabel:
+      conversation.duration_s != null ? formatMmSs(conversation.duration_s * 1000) : null,
+    projectName: project_name,
+    summaryMarkdown: summary_markdown,
+    decisions,
+    actionItems: action_items,
+    openQuestions: open_questions,
+    selfName: selfName ?? null,
+  });
 
   return (
     <div className="mx-auto w-full max-w-[1400px]">

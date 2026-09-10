@@ -108,6 +108,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::onboarding::runner_set_claude_path,
             commands::onboarding::runner_get_claude_path,
             commands::onboarding::runner_health,
+            commands::conversation::conversation_export_markdown,
         ])
         .events(collect_events![
             events::TrayConfirmQuit,

@@ -27,6 +27,7 @@
     "@tanstack/react-router": "^1.170.31",
     "@tanstack/react-virtual": "^3.14.10",
     "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-opener": "^2.5.5",
     "@tauri-apps/plugin-process": "^2.3.0",
     "@tauri-apps/plugin-updater": "^2.9.0",
     "class-variance-authority": "^0.7.1",

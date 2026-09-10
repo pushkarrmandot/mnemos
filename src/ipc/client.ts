@@ -120,6 +120,10 @@ export const commands = {
 
   conversation: {
     getDetail: (conversationId: string) => unwrap(generated.getConversationDetail(conversationId)),
+    /** Writes the same Markdown "Copy as Markdown" produces to Downloads,
+     * returning the path it landed at. */
+    exportMarkdown: (title: string, markdown: string) =>
+      unwrap(generated.conversationExportMarkdown(title, markdown)),
     retryExtraction: (conversationId: string, forceOverwrite: boolean) =>
       unwrap(generated.conversationRetryStep(conversationId, "extraction", forceOverwrite)),
     setActionItemDone: (actionItemId: string, done: boolean) =>

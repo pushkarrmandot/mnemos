@@ -1,4 +1,5 @@
-import { Check, Copy, MoreHorizontal, Trash2 } from "lucide-react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Check, Copy, Download, MoreHorizontal, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/app/Button";
 import {
@@ -8,6 +9,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { commands } from "@/ipc/client";
+import { toast } from "@/lib/toast";
 import { useUIStore } from "@/stores/ui";
 
 const RESET_MS = 1500;
@@ -20,11 +23,17 @@ const RESET_MS = 1500;
  * not a file — see below) and Delete (reusing the existing atomic delete
  * path via `conversation.delete`).
  *
- * "Copy as Markdown" rather than a file-export/Save-As dialog deliberately:
- * a native save dialog needs a new Tauri plugin dependency (none is
- * installed today) — a real, separate call to make, not bundled into this
- * pass. Clipboard needs nothing new (the same `navigator.clipboard` API
- * `CopyButton` already uses elsewhere on this page).
+ * Both "Copy as Markdown" and "Export as Markdown" render the *same*
+ * Markdown — the clipboard and the file cannot disagree about what a meeting
+ * said, so `buildConversationMarkdown` is the single source and the export
+ * command takes the finished text rather than assembling its own.
+ *
+ * Export writes to Downloads rather than opening a Save-As dialog: the file
+ * has one obvious name derived from the title, so a dialog would mostly sit
+ * between the user and the thing they asked for. The success toast offers
+ * "Show in Finder" instead of revealing it automatically — an export that
+ * yanks Finder in front of you unasked is worse than one that tells you where
+ * the file went.
  */
 export function ConversationOverflowMenu({
   conversationId,
@@ -50,6 +59,26 @@ export function ConversationOverflowMenu({
     }
   };
 
+  const [exporting, setExporting] = useState(false);
+  const exportMarkdown = async () => {
+    if (!markdown) return;
+    setExporting(true);
+    try {
+      const path = await commands.conversation.exportMarkdown(title, markdown);
+      // The filename is derived from the title and can be adjusted for
+      // collisions, so the toast names the file that actually landed rather
+      // than the one the user might assume.
+      toast.success(`Saved to ${path.split("/").pop() ?? path}`, {
+        body: "In your Downloads folder.",
+        action: { label: "Show in Finder", onClick: () => void revealItemInDir(path) },
+      });
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -65,6 +94,10 @@ export function ConversationOverflowMenu({
             <Copy aria-hidden="true" className="mr-2 size-3.5" />
           )}
           {copied ? "Copied" : "Copy as Markdown"}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!markdown || exporting} onSelect={() => void exportMarkdown()}>
+          <Download aria-hidden="true" className="mr-2 size-3.5" />
+          {exporting ? "Exporting…" : "Export as Markdown"}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
