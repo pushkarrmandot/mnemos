@@ -1,20 +1,32 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useUIStore } from "@/stores/ui";
+import { createTestQueryClient } from "@/test/routeTestUtils";
 import { Route } from "./_app.settings";
 
 /**
  * Route-level smoke test: `Route.options.component` doesn't call
- * `Route.useParams()`/`<Link>`/`useNavigate()`, so it renders standalone —
- * no router context or query client needed for this one.
+ * `Route.useParams()`/`<Link>`/`useNavigate()`, so it renders without a
+ * router. It does need a query client — the AI-runner section reads runner
+ * health and the configured executable path through TanStack Query.
  */
+function renderRoute(element: ReactElement) {
+  return render(
+    <QueryClientProvider client={createTestQueryClient()}>{element}</QueryClientProvider>,
+  );
+}
 describe("/_app/settings route", () => {
   beforeEach(() => {
     useUIStore.setState({ toasts: [] });
     mockIPC((cmd) => {
       if (cmd === "updater_get_settings") return { auto_check_enabled: true };
       if (cmd === "meeting_detection_get_settings") return { enabled: false };
+      if (cmd === "runner_health")
+        return { state: "ready", version: null, account: null, plan: null };
+      if (cmd === "runner_get_claude_path") return null;
       throw new Error(`unmocked command: ${cmd}`);
     });
   });
@@ -22,7 +34,7 @@ describe("/_app/settings route", () => {
   it("renders without throwing", () => {
     const SettingsRoute = Route.options.component;
     if (!SettingsRoute) throw new Error("route has no component");
-    render(<SettingsRoute />);
+    renderRoute(<SettingsRoute />);
 
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
   });
@@ -44,7 +56,7 @@ describe("/_app/settings route", () => {
 
     const SettingsRoute = Route.options.component;
     if (!SettingsRoute) throw new Error("route has no component");
-    render(<SettingsRoute />);
+    renderRoute(<SettingsRoute />);
 
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
