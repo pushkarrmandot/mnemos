@@ -42,6 +42,16 @@ Speaker labels in the transcript are channel labels, not people: "You" is \
 the microphone (the user) and "Them" is everything the computer played \
 (everyone else on the call, however many that is).
 
+Those labels are assigned on-device from the two audio channels, and they \
+are not always right. When a call plays through speakers — or leaks from \
+headphones — the microphone picks it up too, so the same sentence can be \
+transcribed twice and attributed to both "You" and "Them", usually a second \
+or two apart and worded slightly differently. Treat near-duplicate turns \
+across the two speakers as one utterance, and judge who actually said it \
+from the content and the surrounding conversation rather than the label. \
+Never report the same point twice because it appears under both speakers, \
+and do not infer a disagreement or an echo of agreement from it.
+
 Filling in `assignee_hint`, `decided_by_hint`, and `raised_by_hint`, and \
 their matching `assignee_is_self` / `decided_by_is_self` / \
 `raised_by_is_self` booleans:

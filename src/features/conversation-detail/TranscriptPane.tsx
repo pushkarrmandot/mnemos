@@ -14,6 +14,27 @@ import { READING_MAX_W } from "./layout";
  */
 const ROW_HEIGHT_PX = 76;
 
+/**
+ * Sits above the turns, where the doubt actually is.
+ *
+ * Speaker labels come from which of the two audio channels a turn arrived on,
+ * decided on-device. When a call plays through speakers — or leaks out of
+ * headphones — the microphone hears it too, so the same sentence can appear
+ * under both labels a second or two apart. `audio_bleed` catches some of
+ * that and provably not all of it, and improving it properly needs labelled
+ * recordings rather than threshold guesswork.
+ *
+ * Stated once, quietly, next to the labels rather than as a page banner: a
+ * caveat people scroll past teaches them to ignore it.
+ */
+function SpeakerLabelNote() {
+  return (
+    <p className="type-caption mb-3 text-tertiary">
+      Speaker labels are detected on your device and aren't always right.
+    </p>
+  );
+}
+
 function SpeakerAvatar({ isYou }: { isYou: boolean }) {
   return (
     <span
@@ -63,6 +84,10 @@ function VirtualizedTranscript({ turns }: { turns: TranscriptTurn[] }) {
 
   return (
     <div className={`${READING_MAX_W} mx-auto max-h-[75vh] overflow-y-auto`} ref={parentRef}>
+      {/* Long transcripts take this path and would otherwise miss the note
+          entirely — it lives outside the virtualized window so it is not
+          measured as a row. */}
+      <SpeakerLabelNote />
       <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
         {virtualizer.getVirtualItems().flatMap((row) => {
           const turn = turns[row.index];
@@ -93,6 +118,7 @@ export function TranscriptPane({ turns }: { turns: TranscriptTurn[] }) {
 
   return (
     <div className={`${READING_MAX_W} mx-auto max-h-[75vh] overflow-y-auto`}>
+      <SpeakerLabelNote />
       {turns.map((turn, i) => (
         // Transcript is a fixed, already-persisted array for a done
         // conversation — never reordered or appended to in place.
