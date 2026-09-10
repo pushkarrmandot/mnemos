@@ -58,19 +58,75 @@ use crate::ipc::runner::mcp_shared::MCP_SERVER_NAME;
 /// Windows before choosing a fix (add a file/stdin-based flag to the CLI's
 /// actual argument surface if one exists, rather than hand-rolling escaping
 /// here).
+/// A user-supplied `claude` location, applied process-wide.
+///
+/// Deliberately global rather than threaded through `RunnerConfig`: this is
+/// machine configuration in exactly the way `PATH` is, and the three places
+/// that resolve the binary (onboarding detection, chat spawn, extraction
+/// spawn) would otherwise each need it plumbed in separately and could
+/// disagree. Set once at startup from the `runner.claude_path` setting and
+/// again whenever the user changes it.
+static CONFIGURED_PATH: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// `None` clears the override and returns resolution to PATH + probing.
+pub fn set_configured_claude_path(path: Option<PathBuf>) {
+    if let Ok(mut guard) = CONFIGURED_PATH.write() {
+        *guard = path;
+    }
+}
+
+pub fn configured_claude_path() -> Option<PathBuf> {
+    CONFIGURED_PATH.read().ok().and_then(|g| g.clone())
+}
+
+/// Resolution order: explicit argument, then the user's configured path,
+/// then `PATH`, then the locations installers actually use.
+///
+/// That last step exists because a macOS app launched from Finder does NOT
+/// inherit the shell's `PATH` — launchd hands it `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// and `.zshrc` never runs. Claude Code installs to `~/.local/bin`, which is
+/// not on that list, so a PATH-only scan finds nothing for essentially every
+/// end user who double-clicks the app, while working perfectly when the same
+/// binary is launched from a terminal.
+///
+/// Probing is a convenience, never a guarantee: a managed environment can put
+/// the CLI somewhere no list will ever contain (an Amazon-issued laptop keeps
+/// it in `~/.toolbox/bin`). The configured path is the real answer for those,
+/// and the reason this cannot just be a longer list of guesses.
 pub fn find_claude_binary(configured_path: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = configured_path {
         let path = PathBuf::from(p);
         return path.is_file().then_some(path);
     }
 
-    let path_var = std::env::var_os("PATH")?;
+    if let Some(path) = configured_claude_path() {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
     let candidates: Vec<String> = if cfg!(windows) {
         windows_candidates("claude")
     } else {
         vec!["claude".to_string()]
     };
-    for dir in std::env::split_paths(&path_var) {
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for candidate in &candidates {
+                let full = dir.join(candidate);
+                if full.is_file() {
+                    return Some(full);
+                }
+            }
+        }
+    }
+
+    if !probe_enabled() {
+        return None;
+    }
+
+    for dir in common_install_dirs() {
         for candidate in &candidates {
             let full = dir.join(candidate);
             if full.is_file() {
@@ -79,6 +135,87 @@ pub fn find_claude_binary(configured_path: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Probing is on in the real app and off inside tests that assert the
+/// "nothing installed" path.
+///
+/// Without this seam those tests cannot express their case at all: they
+/// clear `PATH`, but the probe would then find the developer's own real
+/// `claude` in `~/.local/bin` or `/opt/homebrew/bin` and the assertion would
+/// depend on whose machine ran it. Every test that flips this already holds
+/// `path_env_test_lock`, the same lock guarding `PATH` mutation.
+#[cfg(test)]
+static PROBE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Turns install-location probing off until the returned guard drops.
+///
+/// A test that asserts "no runner installed" clears `PATH`, but probing would
+/// then find the developer's own `claude` in `~/.local/bin` or
+/// `/opt/homebrew/bin` and the assertion would pass or fail depending on
+/// whose machine ran it. Restoring on drop rather than by hand means an
+/// early return or a panicking assertion cannot leak `false` into whichever
+/// test runs next in this process.
+#[cfg(test)]
+#[must_use = "probing stays disabled only while the guard is alive"]
+pub(crate) fn probe_disabled_for_test() -> ProbeGuard {
+    PROBE_ENABLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    ProbeGuard
+}
+
+#[cfg(test)]
+pub(crate) struct ProbeGuard;
+
+#[cfg(test)]
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        PROBE_ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn probe_enabled() -> bool {
+    PROBE_ENABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(test))]
+fn probe_enabled() -> bool {
+    true
+}
+
+/// Where the CLI's own installers put it, for the launchd-PATH case above.
+/// Checked in install-method order, most common first.
+fn common_install_dirs() -> Vec<PathBuf> {
+    // `HOME`/`USERPROFILE` directly rather than pulling in a crate for one
+    // lookup — `fs::paths` already resolves the home directory this way.
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    let mut dirs_out: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home.as_ref() {
+        dirs_out.extend([
+            home.join(".local/bin"),    // Claude Code's native installer
+            home.join(".claude/local"), // its older local-install layout
+            home.join(".bun/bin"),
+            home.join(".volta/bin"),
+            home.join(".npm-global/bin"),
+            home.join("node_modules/.bin"),
+        ]);
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs_out.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs_out.push(PathBuf::from(local).join("Programs"));
+        }
+    } else {
+        dirs_out.extend([
+            PathBuf::from("/opt/homebrew/bin"), // Apple Silicon Homebrew
+            PathBuf::from("/usr/local/bin"),    // Intel Homebrew, manual installs
+        ]);
+    }
+    dirs_out
 }
 
 /// `PATHEXT`-aware candidate list for `stem` on Windows: `stem` itself
@@ -311,6 +448,7 @@ mod tests {
         let _guard = super::super::path_env_test_lock().blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("PATH");
+        let _probe_off = crate::ipc::runner::claude::spawn::probe_disabled_for_test();
         unsafe { std::env::set_var("PATH", dir.path()) };
         let found = find_claude_binary(None);
         if let Some(old) = old {
@@ -337,6 +475,68 @@ mod tests {
             unsafe { std::env::set_var("PATH", old) };
         }
         assert_eq!(found, Some(bin));
+    }
+
+    /// The office-laptop case end to end: a `claude` that is on no `PATH`
+    /// and in none of the probed install directories is still resolved,
+    /// because the user pointed us at it.
+    ///
+    /// `find_claude_binary_uses_configured_path_override` covers the
+    /// *argument*, which nothing in the app passes. Every real resolution —
+    /// onboarding detection, a chat spawn, an extraction job — calls
+    /// `find_claude_binary(None)` and depends on the process-wide value that
+    /// `runner_set_claude_path` writes. That is the path a managed machine
+    /// depends on entirely, and it had no coverage at all.
+    #[test]
+    fn a_configured_path_resolves_when_nothing_else_would() {
+        let _guard = super::super::path_env_test_lock().blocking_lock();
+        let _probe_off = crate::ipc::runner::claude::spawn::probe_disabled_for_test();
+
+        // Somewhere no PATH entry and no probe list will ever name — the
+        // shape of `~/.toolbox/bin` on a corporate install.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let empty = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", empty.path()) };
+
+        // Precondition: without the override this is genuinely unfindable,
+        // so a pass below cannot come from PATH or probing.
+        assert!(
+            find_claude_binary(None).is_none(),
+            "precondition: nothing should be resolvable before the override"
+        );
+
+        set_configured_claude_path(Some(bin.clone()));
+        let found = find_claude_binary(None);
+
+        // A path that no longer exists must not shadow PATH forever.
+        set_configured_claude_path(Some(dir.path().join("deleted-since")));
+        let after_stale = find_claude_binary(None);
+
+        set_configured_claude_path(None);
+        let after_clear = find_claude_binary(None);
+
+        if let Some(old) = old {
+            unsafe { std::env::set_var("PATH", old) };
+        }
+
+        assert_eq!(found, Some(bin), "the configured path must win");
+        assert!(
+            after_stale.is_none(),
+            "a stale configured path must fall through, not pin"
+        );
+        assert!(
+            after_clear.is_none(),
+            "clearing must return to PATH + probing"
+        );
     }
 
     #[test]

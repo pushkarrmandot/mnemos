@@ -28,6 +28,7 @@ const KEY_HAS_ONBOARDED: &str = "onboarding.has_onboarded";
 const KEY_FIRST_NAME: &str = "onboarding.user_first_name";
 const KEY_LAST_NAME: &str = "onboarding.user_last_name";
 const KEY_CALENDAR_CHECKLIST_DISMISSED: &str = "onboarding.calendar_checklist_dismissed";
+pub(crate) const KEY_CLAUDE_PATH: &str = "runner.claude_path";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct OnboardingStatus {
@@ -165,6 +166,81 @@ pub async fn onboarding_complete(state: State<'_, AppState>) -> Result<(), AppEr
 #[specta::specta]
 pub fn onboarding_check_claude_cli() -> RunnerDetection {
     RunnerKind::Claude.detect()
+}
+
+/// The user pointing us at a `claude` we could never have found.
+///
+/// Detection scans `PATH` and then the locations the CLI's own installers
+/// use, which covers a normal machine but cannot cover a managed one — an
+/// Amazon-issued laptop keeps the binary in `~/.toolbox/bin`, and no list of
+/// guesses will ever contain every such path. This is the escape hatch, and
+/// on a corporate machine it is the only thing that works.
+///
+/// Validates before storing: a path saved here is used for every subsequent
+/// spawn, so accepting a typo would turn one clear "that file doesn't exist"
+/// into a chat that fails later for no visible reason.
+#[tauri::command]
+#[specta::specta]
+pub async fn runner_set_claude_path(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<RunnerDetection, AppError> {
+    let trimmed = path.as_deref().map(str::trim).filter(|p| !p.is_empty());
+
+    match trimmed {
+        Some(p) => {
+            let candidate = std::path::PathBuf::from(p);
+            if !candidate.is_file() {
+                return Err(AppError::Validation {
+                    message: format!(
+                        "No file at {p}. Running `which claude` in a terminal prints \
+                         the exact location."
+                    ),
+                    field: Some("path".to_string()),
+                });
+            }
+            state
+                .storage
+                .set_setting(KEY_CLAUDE_PATH, serde_json::Value::String(p.to_string()))
+                .await?;
+            crate::ipc::runner::claude::spawn::set_configured_claude_path(Some(candidate));
+        }
+        None => {
+            // Clearing returns resolution to PATH + probing rather than
+            // leaving a stale override that outlives the reason for it.
+            // Written as JSON null rather than deleted: the storage trait has
+            // no delete, and every reader coerces through `as_str()`, which
+            // treats null exactly like an absent row.
+            state
+                .storage
+                .set_setting(KEY_CLAUDE_PATH, serde_json::Value::Null)
+                .await?;
+            crate::ipc::runner::claude::spawn::set_configured_claude_path(None);
+        }
+    }
+
+    Ok(RunnerKind::Claude.detect())
+}
+
+/// What Settings and onboarding render. Unlike `onboarding_check_claude_cli`
+/// this reports sign-in state too, so "installed but signed out" stops
+/// looking identical to "ready".
+#[tauri::command]
+#[specta::specta]
+pub async fn runner_health() -> crate::ipc::runner::RunnerHealth {
+    crate::ipc::runner::claude::probe_health().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn runner_get_claude_path(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    Ok(state
+        .storage
+        .get_setting(KEY_CLAUDE_PATH)
+        .await?
+        .and_then(|v| v.as_str().map(str::to_string)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -517,6 +593,7 @@ mod tests {
         let _guard = crate::ipc::runner::claude::path_env_test_lock().blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("PATH");
+        let _probe_off = crate::ipc::runner::claude::spawn::probe_disabled_for_test();
         unsafe { std::env::set_var("PATH", dir.path()) };
         let detection = onboarding_check_claude_cli();
         if let Some(old) = old {

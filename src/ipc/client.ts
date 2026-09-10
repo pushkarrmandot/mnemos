@@ -304,4 +304,13 @@ export const commands = {
      * this rather than a constant on the Rust side. */
     resize: (height: number) => unwrap(generated.meetingNotificationResize(height)),
   },
+
+  /** The AI runner's usability, and where its binary lives. `health` reports
+   * sign-in state as well as installation, so "installed but signed out"
+   * stops looking identical to "ready" — see `RunnerHealth` in Rust. */
+  runner: {
+    health: () => generated.runnerHealth(),
+    getClaudePath: () => unwrap(generated.runnerGetClaudePath()),
+    setClaudePath: (path: string | null) => unwrap(generated.runnerSetClaudePath(path)),
+  },
 };

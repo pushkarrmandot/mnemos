@@ -1023,6 +1023,43 @@ async meetingNotificationResize(height: number) : Promise<Result<null, AppError>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * The user pointing us at a `claude` we could never have found.
+ * 
+ * Detection scans `PATH` and then the locations the CLI's own installers
+ * use, which covers a normal machine but cannot cover a managed one — an
+ * Amazon-issued laptop keeps the binary in `~/.toolbox/bin`, and no list of
+ * guesses will ever contain every such path. This is the escape hatch, and
+ * on a corporate machine it is the only thing that works.
+ * 
+ * Validates before storing: a path saved here is used for every subsequent
+ * spawn, so accepting a typo would turn one clear "that file doesn't exist"
+ * into a chat that fails later for no visible reason.
+ */
+async runnerSetClaudePath(path: string | null) : Promise<Result<RunnerDetection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("runner_set_claude_path", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async runnerGetClaudePath() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("runner_get_claude_path") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * What Settings and onboarding render. Unlike `onboarding_check_claude_cli`
+ * this reports sign-in state too, so "installed but signed out" stops
+ * looking identical to "ready".
+ */
+async runnerHealth() : Promise<RunnerHealth> {
+    return await TAURI_INVOKE("runner_health");
 }
 }
 
@@ -1376,7 +1413,18 @@ export type Pong = { app_version: string; worker_ready: boolean }
  * here to keep this struct's wire shape identical to what every caller of
  * `emit_progress` already sends — narrowing it is a separate decision.
  */
-export type ProcessingProgress = { conversation_id: string; step: string; status: string; pct: number | null }
+export type ProcessingProgress = { conversation_id: string; step: string; status: string; pct: number | null; 
+/**
+ * Why it failed, in words meant for the user — `None` for every status
+ * other than `failed`.
+ * 
+ * Without this the UI could only say "Processing failed during
+ * extracting", while the actual cause ("Claude Code is signed out. Run
+ * `claude auth login`…") sat in the database and the log file. The
+ * message is already written to `pipeline_step`, so a reload recovers
+ * it; this carries it live.
+ */
+error: string | null }
 export type Project = { id: string; name: string; description: string | null; pinned: boolean; archived: boolean; deleted_at: number | null; created_at: number; updated_at: number }
 /**
  * `project_memory.json`'s shape (`pages/05_PROJECT_MEMORY.md`
@@ -1472,6 +1520,32 @@ export type RefreshHandle = { enqueued_at_ms: number; batch_signature: string }
 export type RegenerateOutcome = { summary_written: boolean }
 export type RetryableStep = "extraction"
 export type RunnerDetection = { installed: boolean; path: string | null }
+/**
+ * Whether a runner can actually do work right now, as a single value every
+ * runner reports the same way.
+ * 
+ * Exists because "is the CLI installed" was never the whole question. A
+ * signed-out CLI is installed, on PATH, and completely unable to produce a
+ * summary — and the way that used to surface was a substring search of
+ * stderr after a turn had already died. That guess is gone: the same check
+ * now answers both before a spawn and after an unexpected exit, so there is
+ * one source of truth rather than two that can drift. Claude answers via
+ * `claude auth status --json`; codex will answer it its own way. The
+ * variants are deliberately vendor-neutral so the UI can render one set of
+ * states for any runner.
+ */
+export type RunnerHealth = { state: "ready"; version: string | null; account: string | null; plan: string | null } | { state: "not_installed" } | { state: "not_logged_in" } | 
+/**
+ * Usage limit or quota exhaustion — installed and authenticated, just
+ * refusing work for now.
+ */
+{ state: "blocked"; resets_at: number | null } | 
+/**
+ * The check itself could not be completed (timeout, unparsable output).
+ * Deliberately distinct from `NotLoggedIn`: telling someone to sign in
+ * when we simply could not tell sends them to fix the wrong thing.
+ */
+{ state: "unknown"; detail: string }
 /**
  * Where a prompt is going. Two variants rather than an optional
  * `session_id` beside an optional `scope`, so "a session id *and* a

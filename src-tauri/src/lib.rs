@@ -105,6 +105,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             commands::meeting_detection::meeting_notification_start_recording,
             commands::meeting_detection::meeting_notification_dismiss,
             commands::meeting_detection::meeting_notification_resize,
+            commands::onboarding::runner_set_claude_path,
+            commands::onboarding::runner_get_claude_path,
+            commands::onboarding::runner_health,
         ])
         .events(collect_events![
             events::TrayConfirmQuit,
@@ -315,15 +318,73 @@ fn typescript_config() -> specta_typescript::Typescript {
 /// registry-backed environment block already — this is a no-op there.
 #[cfg(not(windows))]
 fn fix_gui_launch_path() {
+    // Two-stage, cheapest first.
+    //
+    // `-lc` sources `.zprofile`/`.zlogin` but NOT `.zshrc`, and `.zshrc` is
+    // where most people and most installers actually add to PATH — a real
+    // corporate machine had `export PATH=$PATH:~/.toolbox/bin` there, which
+    // `-lc` never saw, so Mnemos reported "Claude Code not found" on a laptop
+    // where `which claude` answered instantly.
+    //
+    // The fix is `-lic` (login AND interactive), but running it
+    // unconditionally makes every launch wait on the user's interactive rc
+    // file. Measured on a machine whose `.zshrc` runs `conda initialize`:
+    // `-lc` 84ms, `-lic` 978ms. Charging every user ~0.9s of startup to
+    // rescue the minority whose PATH `-lc` cannot see is the wrong trade, so
+    // the interactive pass runs only when the cheap one left us unable to
+    // find the runner at all.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    // `-lc` runs the user's login rc files, which can do arbitrary
-    // path-relative work. Don't let that happen on the inherited `/` — a
-    // Finder-launched `.app` starts there, and anything an rc file does
-    // relative to the filesystem root can wander into TCC-protected user
-    // folders and surface a permission prompt the user never asked for.
-    let mut command = std::process::Command::new(&shell);
+
+    if let Some(path) = harvest_shell_path(&shell, "-lc") {
+        apply_path(&path, &shell, "-lc");
+    }
+    // Already resolvable? Then the login shell told us everything we needed
+    // and nobody pays for the interactive pass.
+    if crate::ipc::runner::claude::spawn::find_claude_binary(None).is_some() {
+        return;
+    }
+    // `-ic`, NOT `-lic`. zsh reads `.zshrc` for either, but bash does not:
+    // a *login* bash reads `.bash_profile` and ignores `.bashrc` even when
+    // interactive, so `-lic` fixes zsh users and silently fails every bash
+    // user whose `.bash_profile` does not source `.bashrc`. Verified both
+    // shells against both layouts.
+    //
+    // Non-login costs nothing here because stage 1 has already applied the
+    // login PATH to this process, and this shell inherits it — so the result
+    // is the union of both rc sets rather than a replacement.
+    tracing::info!("gui_path_fixup.retrying_interactive");
+    if let Some(path) = harvest_shell_path(&shell, "-ic") {
+        apply_path(&path, &shell, "-ic");
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_path(resolved: &str, shell: &str, flags: &str) {
+    tracing::info!(path = resolved, shell = %shell, flags, "gui_path_fixup.applied");
+    // SAFETY: called during `run()`'s first statements, before any other
+    // thread exists — no concurrent env access is possible.
+    unsafe { std::env::set_var("PATH", resolved) };
+}
+
+/// Runs one shell and returns the PATH it reports, or `None` on any failure.
+#[cfg(not(windows))]
+fn harvest_shell_path(shell: &str, flags: &str) -> Option<String> {
+    // These rc files can do arbitrary path-relative work. Don't let that
+    // happen on the inherited `/` — a Finder-launched `.app` starts there,
+    // and anything relative to the filesystem root can wander into
+    // TCC-protected folders and raise a permission prompt nobody asked for.
+    //
+    // Sentinel-wrapped because an interactive shell is allowed to talk: rc
+    // files print banners, shell-integration hooks, job-control notices.
+    // Taking all of stdout would splice that straight into PATH.
+    const PATH_MARKER_START: &str = "__MNEMOS_PATH__";
+    const PATH_MARKER_END: &str = "__END_MNEMOS_PATH__";
+    let script = format!("printf '{PATH_MARKER_START}%s{PATH_MARKER_END}' \"$PATH\"");
+    let mut command = std::process::Command::new(shell);
     command
-        .args(["-lc", "echo -n \"$PATH\""])
+        .args([flags, &script])
+        // An interactive shell must never be able to sit waiting on input.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     if let Ok(root) = crate::fs::paths::data_root() {
@@ -335,7 +396,7 @@ fn fix_gui_launch_path() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(shell = %shell, error = %e, "gui_path_fixup.spawn_failed");
-            return;
+            return None;
         }
     };
 
@@ -364,31 +425,33 @@ fn fix_gui_launch_path() {
         }
     };
 
-    let Some(status) = status else { return };
+    let status = status?;
     if !status.success() {
         tracing::warn!(shell = %shell, "gui_path_fixup.shell_exited_nonzero");
-        return;
+        return None;
     }
-    let Some(stdout) = child.stdout.take() else {
-        return;
-    };
+    let stdout = child.stdout.take()?;
     use std::io::Read;
     let mut buf = String::new();
     if std::io::BufReader::new(stdout)
         .read_to_string(&mut buf)
         .is_err()
     {
-        return;
+        return None;
     }
-    let resolved = buf.trim();
-    if resolved.is_empty() {
-        return;
-    }
+    // Extract strictly from between the markers; anything an rc file printed
+    // around them is discarded rather than parsed.
+    let Some(resolved) = buf
+        .split_once(PATH_MARKER_START)
+        .and_then(|(_, rest)| rest.split_once(PATH_MARKER_END))
+        .map(|(value, _)| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(shell = %shell, flags, "gui_path_fixup.no_marker_in_output");
+        return None;
+    };
 
-    tracing::info!(path = resolved, "gui_path_fixup.applied");
-    // SAFETY: called once, synchronously, before any other thread exists
-    // (the very first line of `run()`) — no concurrent env access possible.
-    unsafe { std::env::set_var("PATH", resolved) };
+    Some(resolved.to_string())
 }
 
 pub fn run() {
@@ -490,6 +553,39 @@ pub fn run() {
             commands::tray::build(app)?;
 
             // Meeting auto-detect: a long-lived background watcher, not
+            // A user-configured `claude` location has to be in place before
+            // anything resolves the binary — onboarding's detection, a chat
+            // spawn, an extraction job. Loaded here, once, so every later
+            // lookup sees it without each call site reading settings.
+            {
+                let path_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use crate::db::service::StorageService;
+                    let state = path_handle.state::<AppState>();
+                    let configured = state
+                        .storage
+                        .get_setting(commands::onboarding::KEY_CLAUDE_PATH)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.as_str().map(std::path::PathBuf::from));
+                    if let Some(path) = configured {
+                        tracing::info!(path = %path.display(), "runner.claude_path.loaded");
+                        crate::ipc::runner::claude::spawn::set_configured_claude_path(Some(path));
+                    }
+                    // Logged unconditionally: when someone reports "it can't
+                    // find Claude", this line and `gui_path_fixup.applied`
+                    // are the two facts that make it diagnosable from a log
+                    // file instead of a screenshot of their .zshrc.
+                    match crate::ipc::runner::claude::spawn::find_claude_binary(None) {
+                        Some(found) => {
+                            tracing::info!(path = %found.display(), "runner.claude.resolved")
+                        }
+                        None => tracing::warn!("runner.claude.unresolved"),
+                    }
+                });
+            }
+
             // tied to any one recording (see
             // product_docs/MEETING_AUTO_DETECT_DESIGN.md "Lifecycle") — so
             // it starts here, once, rather than anywhere in the recording

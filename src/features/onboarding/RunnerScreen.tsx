@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, HelpCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, HelpCircle } from "lucide-react";
 import { Button } from "@/components/app/Button";
 import { commands } from "@/ipc/client";
 import { t } from "@/lib/i18n";
+import { ManualPathDisclosure } from "./ManualPathDisclosure";
 
 /** Anthropic's real Claude Code install docs — routed to directly, no in-app
  * install flow (installing/authenticating a CLI is squarely that CLI's own
@@ -27,13 +28,22 @@ export function RunnerScreen({
   onContinue: () => void;
 }) {
   const queryClient = useQueryClient();
+  // `runner.health`, not `checkClaudeCli`: an installed-but-signed-out CLI
+  // is on PATH and completely unable to produce a summary, and gating on
+  // "installed" alone let someone finish onboarding into that state and only
+  // discover it when their first meeting failed to summarise.
   const { data, isPending } = useQuery({
     queryKey: QUERY_KEY,
-    queryFn: () => commands.onboarding.checkClaudeCli(),
+    queryFn: () => commands.runner.health(),
     staleTime: 0,
   });
 
-  const installed = data?.installed ?? false;
+  const state = data?.state;
+  const installed = state !== undefined && state !== "not_installed";
+  // `unknown` does not block: the check itself failed, which is not evidence
+  // the runner is unusable, and stranding someone on a check we could not
+  // complete is worse than letting them proceed to a real error.
+  const ready = state === "ready" || state === "blocked" || state === "unknown";
   const recheck = () => queryClient.invalidateQueries({ queryKey: QUERY_KEY });
 
   return (
@@ -61,10 +71,20 @@ export function RunnerScreen({
           <p className="type-h3 text-primary">{t("onboarding.claude-code")}</p>
           {isPending ? (
             <p className="type-caption text-tertiary">{t("onboarding.checking")}</p>
-          ) : installed ? (
+          ) : data?.state === "ready" ? (
             <p className="type-caption flex items-center gap-1 text-success">
               <CheckCircle2 className="size-3.5" />
-              {t("onboarding.detected-logged-in")}
+              {data.account ?? t("onboarding.detected-logged-in")}
+            </p>
+          ) : state === "not_logged_in" ? (
+            <p className="type-caption flex items-center gap-1 text-warning">
+              <AlertTriangle className="size-3.5" />
+              {t("onboarding.signed-out")}
+            </p>
+          ) : state === "unknown" ? (
+            <p className="type-caption flex items-center gap-1 text-tertiary">
+              <HelpCircle className="size-3.5" />
+              {t("onboarding.health-unknown")}
             </p>
           ) : (
             <p className="type-caption flex items-center gap-1 text-tertiary">
@@ -86,10 +106,26 @@ export function RunnerScreen({
       </div>
 
       {!isPending && !installed && (
+        <>
+          <div className="mt-3 rounded-md border border-subtle bg-subtle p-3">
+            <p className="type-caption text-secondary">{t("onboarding.install-step-1")}</p>
+            <p className="type-caption text-secondary">{t("onboarding.install-step-2")}</p>
+            <p className="type-caption text-secondary">{t("onboarding.install-step-3")}</p>
+          </div>
+          <ManualPathDisclosure onResolved={recheck} />
+        </>
+      )}
+
+      {!isPending && state === "not_logged_in" && (
         <div className="mt-3 rounded-md border border-subtle bg-subtle p-3">
-          <p className="type-caption text-secondary">{t("onboarding.install-step-1")}</p>
-          <p className="type-caption text-secondary">{t("onboarding.install-step-2")}</p>
-          <p className="type-caption text-secondary">{t("onboarding.install-step-3")}</p>
+          <ol className="flex list-decimal flex-col gap-1.5 pl-4">
+            <li className="type-caption text-secondary">{t("onboarding.signin-step-1")}</li>
+            <li className="type-caption text-secondary">
+              Run{" "}
+              <code className="rounded-sm bg-active px-1 py-0.5 font-mono">claude auth login</code>
+            </li>
+            <li className="type-caption text-secondary">{t("onboarding.signin-step-3")}</li>
+          </ol>
         </div>
       )}
 
@@ -104,12 +140,12 @@ export function RunnerScreen({
           {t("onboarding.back")}
         </button>
         <div className="flex gap-2.5">
-          {!isPending && !installed && (
+          {!isPending && !ready && (
             <Button onClick={recheck} variant="secondary">
               {t("onboarding.recheck")}
             </Button>
           )}
-          <Button disabled={!installed} onClick={onContinue}>
+          <Button disabled={!ready} onClick={onContinue}>
             {t("onboarding.continue")}
           </Button>
         </div>
