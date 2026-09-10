@@ -26,7 +26,26 @@ from mnemos_worker.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_pro
 # size. ~500k chars ≈ Claude Sonnet's ~200k token budget.
 MAX_TRANSCRIPT_CHARS = 500_000
 
-DEFAULT_TIMEOUT_MS = 30_000
+# Extraction has to cover process start, the model round-trip, and structured
+# output over the whole transcript. 30s covered that on a fast, warm, direct
+# connection and nothing else: on a corporate machine whose `claude` proxies
+# through an internal gateway, a 164-segment transcript timed out three times
+# in a row at exactly 30.0s, while interactive chat on the same binary worked
+# fine. The budget was the problem, not the runner.
+#
+# Scaled by transcript size, because one deadline for a five-minute standup
+# and a ninety-minute workshop cannot be right for both. Generous on purpose:
+# the cost of waiting too long is a slow summary, and the cost of being too
+# strict is no summary at all plus a failure the user has to act on.
+BASE_TIMEOUT_MS = 180_000
+# ~1s per 1k transcript characters, on top of the base.
+TIMEOUT_MS_PER_1K_CHARS = 1_000
+MAX_TIMEOUT_MS = 900_000
+
+
+def _timeout_for(transcript: dict[str, Any]) -> int:
+    scaled = BASE_TIMEOUT_MS + (_transcript_body_len(transcript) // 1_000) * TIMEOUT_MS_PER_1K_CHARS
+    return min(scaled, MAX_TIMEOUT_MS)
 
 
 def _transcript_body_len(transcript: dict[str, Any]) -> int:
@@ -39,7 +58,7 @@ def extract_memory(params: dict[str, Any]) -> dict[str, Any]:
     contacts = params.get("contacts") or []
     notes = params.get("notes")
     conversation_meta = params.get("conversation_meta") or {}
-    timeout_ms = params.get("timeout_ms", DEFAULT_TIMEOUT_MS)
+    timeout_ms = params.get("timeout_ms") or _timeout_for(transcript)
 
     if _transcript_body_len(transcript) > MAX_TRANSCRIPT_CHARS:
         raise WorkerJobError(VALIDATION, "extraction: transcript_length exceeds cap")

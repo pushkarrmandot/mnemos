@@ -21,7 +21,13 @@ use crate::ipc::runner::{
     AgentEvent, AgentRunner, ApprovalPolicy, PromptRequest, RunnerConfig, UserContent,
 };
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// Only the fallback for a caller that sends no `timeout_ms`. The worker
+/// always sends one, scaled to transcript size (`extract_memory.py`), so this
+/// is the floor rather than the policy. Raised from 30s, which was the exact
+/// deadline a real corporate machine hit three times in a row while
+/// interactive chat on the same binary worked — the budget was the problem,
+/// not the runner.
+const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 /// At most 2 concurrent
 /// `run_agent_extraction` dispatches. Two concurrent `claude` subprocesses
 /// is well within resource budget.
@@ -92,6 +98,20 @@ async fn run_extraction(
     system_prompt: String,
     timeout_ms: u64,
 ) -> Result<Value, AppError> {
+    // Extraction produced exactly one log line — the timeout, thirty seconds
+    // after the last thing that happened. Whether the runner had started,
+    // whether the model had answered, whether anything was spawned at all:
+    // none of it was recorded, so a real failure on a real machine could only
+    // be guessed at. These lines are the difference between diagnosing that
+    // in five minutes and reconstructing it from an absence.
+    let started = std::time::Instant::now();
+    tracing::info!(
+        prompt_chars = prompt.len(),
+        timeout_ms,
+        model = MODEL_IDS.extraction,
+        "extraction.starting"
+    );
+
     let mut runner: Box<dyn AgentRunner> = Box::new(ClaudeRunner::new());
     if let Err(e) = runner
         .start(RunnerConfig {
@@ -106,9 +126,18 @@ async fn run_extraction(
         })
         .await
     {
+        tracing::warn!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            error = %e,
+            "extraction.start_failed"
+        );
         let _ = runner.dispose().await;
         return Err(e);
     }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "extraction.runner_started"
+    );
 
     let mut stream = match runner
         .prompt(PromptRequest {
@@ -119,6 +148,11 @@ async fn run_extraction(
     {
         Ok(s) => s,
         Err(e) => {
+            tracing::warn!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                error = %e,
+                "extraction.prompt_failed"
+            );
             let _ = runner.dispose().await;
             return Err(e);
         }
@@ -126,9 +160,15 @@ async fn run_extraction(
 
     let mut buffer = String::new();
     let mut terminal_error = None;
+    // When nothing ever arrives, "did the model answer slowly or not at all?"
+    // is the whole question, and it is unanswerable without this.
+    let mut first_token_ms: Option<u64> = None;
     while let Some(ev) = stream.next().await {
         match ev {
-            AgentEvent::TokenDelta { text, .. } => buffer.push_str(&text),
+            AgentEvent::TokenDelta { text, .. } => {
+                first_token_ms.get_or_insert_with(|| started.elapsed().as_millis() as u64);
+                buffer.push_str(&text);
+            }
             AgentEvent::Complete { .. } => break,
             AgentEvent::Error { error, .. } => {
                 terminal_error = Some(error);
@@ -139,6 +179,14 @@ async fn run_extraction(
     }
     drop(stream);
     let _ = runner.dispose().await;
+
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        first_token_ms,
+        response_chars = buffer.len(),
+        failed = terminal_error.is_some(),
+        "extraction.finished"
+    );
 
     if let Some(err) = terminal_error {
         return Err(err);
