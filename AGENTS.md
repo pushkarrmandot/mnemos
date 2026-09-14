@@ -187,6 +187,42 @@ late command against an already-stopped session resolves to a clean
 that concurrent recordings are supported; nothing else in the pipeline
 assumes that.
 
+**The job executor's single slot is not what makes the transcription model
+safe — `ParakeetModel._executor` is.** `job_executor.py` says "models are not
+thread-safe" and runs one job at a time, which reads as though that queue is
+the model's protection. It isn't: `ParakeetModel` serializes all three of its
+callers through its own `ThreadPoolExecutor(max_workers=1)`, and the
+live-transcription poll loop is a plain `threading.Thread` that never touches
+the job queue at all. Live transcription and a background `transcribe_final`
+already overlap today, safely. Two `transcribe_final` jobs would serialize at
+the model rather than at the queue.
+
+The consequence is that `extract_memory` and `refresh_project_memory` are
+serialized for no reason of their own. Neither touches a model — they build a
+prompt and reverse-RPC to Rust, which spawns a `claude` subprocess. They
+inherited the constraint by sharing a queue with jobs that need it, and the
+cost is real: a project-memory refresh queued behind a 93s extraction was
+swept at its deadline having never run (see `job_progress.report_for`).
+
+**If you make that parallel, these are the things that assume it is not:**
+
+- `job_progress._current_request_id` is a module global. It must become a
+  `contextvars.ContextVar` or ticks get attributed to the wrong request — the
+  comment there says so already.
+- The transcription progress subscriber in `commands/recording.rs` reads
+  *every* `job_progress` tick as belonging to its own call and needs to filter
+  by request id; otherwise another job's progress drives the transcription
+  bar.
+- **`current_job.json` holds exactly one job, and it is what the Rust
+  supervisor replays after a crash.** Concurrency makes it a set, and the
+  replay logic changes with it. This is the real work here, and it is
+  crash-recovery semantics — the one part of this that should not be done as
+  a bolt-on to something else.
+
+Deliberately not done pre-v1: the failures that motivated it are fixed
+(deadlines bound silence, queued jobs report), and overlapping heavy jobs are
+rare in practice. Do it as its own change, not alongside another.
+
 ---
 
 ## Migrations
