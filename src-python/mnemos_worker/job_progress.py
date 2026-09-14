@@ -51,13 +51,32 @@ def set_current_request_id(request_id: str | None) -> None:
 
 
 def report(kind: str, fraction: float, **extra: Any) -> None:
-    """Emit one progress tick. Best-effort and never raises: this runs from
-    inside inference loops, and a broken notifier must not be able to fail a
-    transcription that is otherwise succeeding."""
-    if _notify is None or _current_request_id is None:
+    """Emit one progress tick for the job currently executing. Best-effort and
+    never raises: this runs from inside inference loops, and a broken notifier
+    must not be able to fail a transcription that is otherwise succeeding."""
+    if _current_request_id is None:
+        return
+    report_for(_current_request_id, kind, fraction, **extra)
+
+
+def report_for(request_id: str, kind: str, fraction: float, **extra: Any) -> None:
+    """Emit a tick for an explicitly named request, rather than whichever job
+    is executing right now.
+
+    Needed because a job that is *queued* still has to keep its deadline
+    alive. The host's TTL bounds silence, but it starts counting when the
+    request is sent, not when the job starts running — and only one job runs
+    at a time here (the models are not thread-safe). So a request that waits
+    its turn behind a two-minute extraction goes quiet through no fault of
+    anyone's and is swept before it ever executes, which is exactly how a
+    project-memory refresh queued behind a 93s extraction died at 60s having
+    never run. Waiting in line is not the same as being unresponsive, and
+    `report` cannot say so: its module-global id names the *running* job.
+    """
+    if _notify is None:
         return
     payload: dict[str, Any] = {
-        "request_id": _current_request_id,
+        "request_id": request_id,
         "kind": kind,
         # Clamped because callers derive it from sample counts, and the
         # final chunk can overshoot the total by the overlap window.

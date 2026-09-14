@@ -19,6 +19,11 @@ from mnemos_worker.state_files import atomic_write_json, remove_if_exists
 
 OnResponse = Callable[[str, dict[str, Any] | None, dict[str, Any] | None], None]
 
+# How often to re-arm the deadline of every job still waiting its turn.
+# Comfortably under the host's silence windows (60s for the memory jobs),
+# with room to miss a tick.
+QUEUE_HEARTBEAT_S = 10.0
+
 
 class JobExecutor:
     def __init__(self, state_dir: Path, on_response: OnResponse, logger: Any) -> None:
@@ -36,9 +41,37 @@ class JobExecutor:
         self._current_done = threading.Event()
         self._current_done.set()
         self._thread = threading.Thread(target=self._run, name="job-executor", daemon=True)
+        self._stopping = threading.Event()
+        self._queue_heartbeat = threading.Thread(
+            target=self._tick_queued_jobs, name="job-queue-heartbeat", daemon=True
+        )
 
     def start(self) -> None:
         self._thread.start()
+        self._queue_heartbeat.start()
+
+    def _tick_queued_jobs(self) -> None:
+        """Keeps *queued* jobs' host-side deadlines alive.
+
+        Only one job runs at a time (the models are not thread-safe), so
+        anything submitted while a long job is in flight simply waits. The
+        host's TTL bounds silence but starts counting when the request is
+        sent, so a waiting job looks identical to a wedged worker and is swept
+        before it ever runs — observed in the field as a project-memory
+        refresh queued behind a 93s extraction, failed at exactly 60s having
+        executed nothing.
+
+        The running job reports for itself (`job_progress.report`, and
+        `agent_call`'s ticker while it blocks); this covers everyone still in
+        line. A genuinely dead worker stops writing frames altogether, so
+        nothing here weakens the host's ability to notice that.
+        """
+        while not self._stopping.wait(QUEUE_HEARTBEAT_S):
+            with self._pending_lock:
+                waiting = [(j["id"], j["kind"]) for j in self._pending]
+            for request_id, kind in waiting:
+                # Best-effort and never raises (see `job_progress`).
+                job_progress.report_for(request_id, kind, 0.0, state="queued")
 
     def submit(self, request_id: str, kind: str, params: dict[str, Any]) -> None:
         job_key = (kind, str(params.get("job_id", request_id)))
@@ -59,6 +92,7 @@ class JobExecutor:
         self._current_done.wait(timeout_s)
 
     def stop(self) -> None:
+        self._stopping.set()
         self._queue.put(None)
 
     def _persist_pending_locked(self) -> None:

@@ -105,3 +105,56 @@ def test_idempotent_replay_returns_cached_result(tmp_path: Path):
     assert len(responses) == 2
     assert responses[1][0] == "req-6"
     assert responses[1][1] == responses[0][1]
+
+
+def test_a_queued_job_keeps_reporting_while_it_waits(tmp_path, monkeypatch):
+    """The field failure: only one job runs at a time, so a job submitted
+    behind a long one just waits. The host's TTL bounds silence but starts
+    counting when the request is sent, so a waiting job was indistinguishable
+    from a wedged worker and got swept before it ever ran — a project-memory
+    refresh queued behind a 93s extraction died at exactly 60s having executed
+    nothing."""
+    import mnemos_worker.job_executor as job_executor_mod
+    from mnemos_worker import job_progress
+
+    monkeypatch.setattr(job_executor_mod, "QUEUE_HEARTBEAT_S", 0.02)
+    ticks: list[dict] = []
+    job_progress.configure_progress_notifier(lambda method, params: ticks.append(params))
+
+    executor = JobExecutor(tmp_path, on_response=lambda *a: None, logger=DummyLogger())
+    executor.start()
+    try:
+        # `slow` occupies the single slot; `waiting` can only sit in the queue.
+        executor.submit("100", "test_job", {"delay_ms": 300})
+        executor.submit("200", "test_job", {})
+        time.sleep(0.15)
+        queued_ticks = [t for t in ticks if t["request_id"] == "200"]
+    finally:
+        executor.stop()
+        job_progress.configure_progress_notifier(None)
+
+    assert queued_ticks, "a job waiting its turn must still re-arm its deadline"
+    assert queued_ticks[0]["state"] == "queued"
+
+
+def test_the_heartbeat_stops_reporting_a_job_once_it_starts_running(tmp_path, monkeypatch):
+    """Once a job leaves the queue it reports for itself; the heartbeat must
+    let go of it, or a finished request would keep being re-armed."""
+    import mnemos_worker.job_executor as job_executor_mod
+    from mnemos_worker import job_progress
+
+    monkeypatch.setattr(job_executor_mod, "QUEUE_HEARTBEAT_S", 0.02)
+    ticks: list[dict] = []
+    job_progress.configure_progress_notifier(lambda method, params: ticks.append(params))
+
+    executor = JobExecutor(tmp_path, on_response=lambda *a: None, logger=DummyLogger())
+    executor.start()
+    try:
+        executor.submit("300", "test_job", {})
+        time.sleep(0.15)
+        after_completion = len(ticks)
+        time.sleep(0.1)
+        assert len(ticks) == after_completion, "no queue ticks for a job that already ran"
+    finally:
+        executor.stop()
+        job_progress.configure_progress_notifier(None)
