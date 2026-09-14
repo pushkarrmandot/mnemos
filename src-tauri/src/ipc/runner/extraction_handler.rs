@@ -192,11 +192,72 @@ async fn run_extraction(
         return Err(err);
     }
 
-    serde_json::from_str(strip_code_fence(buffer.trim())).map_err(|e| AppError::Runner {
+    let bare = strip_code_fence(buffer.trim());
+    serde_json::from_str(&escape_control_chars_in_strings(bare)).map_err(|e| AppError::Runner {
         runner: "claude".to_string(),
         message: format!("agent_json_parse: {e}"),
         correlation_id: crate::error::correlation_id(),
     })
+}
+
+/// Escapes raw C0 control characters that appear *inside* JSON string
+/// literals, leaving structural whitespace between tokens alone.
+///
+/// Strict JSON forbids an unescaped control character in a string, and
+/// `serde_json` enforces that. Models break the rule routinely on this
+/// prompt: every field we ask for is prose, `summary_markdown` is Markdown,
+/// and Markdown is multi-line — so the model writes a real newline where the
+/// grammar demands `\n`. Observed on a corporate gateway as
+/// `control character (\u0000-\u001F) found while parsing a string at line 2
+/// column 0` — the first literal newline inside an otherwise single-line
+/// object, failing both the initial call and the schema retry identically.
+///
+/// Worth fixing here rather than in the prompt because the model's output is
+/// *semantically* right every time — 9,940 characters of correct extraction
+/// were discarded over an escaping detail. A retry cannot help: the second
+/// turn writes prose the same way the first did. This is the same class of
+/// defense as `strip_code_fence` directly above.
+///
+/// Only the text between an unescaped `"` pair is touched, so indentation and
+/// newlines in pretty-printed JSON pass through untouched, and already-correct
+/// output is returned borrowed without allocating.
+fn escape_control_chars_in_strings(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut out: Option<String> = None;
+
+    for (i, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            } else if (ch as u32) < 0x20 {
+                // First offender: copy everything cleared so far, then start
+                // rewriting.
+                let buf = out.get_or_insert_with(|| text[..i].to_string());
+                match ch {
+                    '\n' => buf.push_str("\\n"),
+                    '\r' => buf.push_str("\\r"),
+                    '\t' => buf.push_str("\\t"),
+                    c => buf.push_str(&format!("\\u{:04x}", c as u32)),
+                }
+                continue;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        }
+        if let Some(buf) = out.as_mut() {
+            buf.push(ch);
+        }
+    }
+
+    match out {
+        Some(s) => std::borrow::Cow::Owned(s),
+        None => std::borrow::Cow::Borrowed(text),
+    }
 }
 
 /// Defense-in-depth against a model wrapping its JSON in a markdown code
@@ -343,6 +404,67 @@ mod tests {
     fn strip_code_fence_is_a_noop_on_bare_json() {
         let bare = "{\"a\": 1}";
         assert_eq!(strip_code_fence(bare), bare);
+    }
+
+    /// The exact failure from the field: a single-line object whose Markdown
+    /// field carries real newlines. `serde_json` rejects it verbatim with
+    /// "control character ... at line 2 column 0"; it must parse after
+    /// sanitizing, and the newlines must survive as newlines.
+    #[test]
+    fn raw_newlines_inside_a_string_are_escaped_and_preserved() {
+        let raw = "{\"summary_markdown\": \"# Notes\n\n- one\n- two\"}";
+        assert!(
+            serde_json::from_str::<serde_json::Value>(raw).is_err(),
+            "precondition: strict JSON must reject the raw form"
+        );
+
+        let fixed = escape_control_chars_in_strings(raw);
+        let value: serde_json::Value = serde_json::from_str(&fixed).expect("sanitized JSON parses");
+        assert_eq!(
+            value["summary_markdown"].as_str().unwrap(),
+            "# Notes\n\n- one\n- two",
+            "the newlines must come back as real newlines, not literal backslash-n"
+        );
+    }
+
+    #[test]
+    fn tabs_and_other_c0_controls_inside_a_string_are_escaped() {
+        let raw = "{\"a\": \"x\ty\u{7}z\"}";
+        let value: serde_json::Value =
+            serde_json::from_str(&escape_control_chars_in_strings(raw)).expect("parses");
+        assert_eq!(value["a"].as_str().unwrap(), "x\ty\u{7}z");
+    }
+
+    /// Newlines and indentation *between* tokens are legal JSON whitespace and
+    /// must not be touched — only text inside string literals is rewritten.
+    #[test]
+    fn pretty_printed_json_is_left_alone() {
+        let pretty = "{\n  \"a\": 1,\n  \"b\": \"ok\"\n}";
+        assert!(matches!(
+            escape_control_chars_in_strings(pretty),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(escape_control_chars_in_strings(pretty), pretty);
+    }
+
+    /// An escaped quote inside a string must not be read as the string ending,
+    /// or everything after it would be treated as structure and left unescaped.
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string() {
+        let raw = "{\"a\": \"he said \\\"hi\\\"\nbye\"}";
+        let value: serde_json::Value =
+            serde_json::from_str(&escape_control_chars_in_strings(raw)).expect("parses");
+        assert_eq!(value["a"].as_str().unwrap(), "he said \"hi\"\nbye");
+    }
+
+    /// Already-valid output is the common case and must not allocate.
+    #[test]
+    fn valid_json_is_returned_borrowed() {
+        let ok = "{\"a\": \"already \\n escaped\"}";
+        assert!(matches!(
+            escape_control_chars_in_strings(ok),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
