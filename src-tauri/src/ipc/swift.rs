@@ -82,6 +82,64 @@ impl SidecarControl {
     }
 }
 
+/// How long the sidecar's `execve` may take before Record gives up. Generous
+/// against a slow disk or a cold page cache, short enough that a stalled
+/// Gatekeeper lookup surfaces as an error someone can act on instead of a
+/// button that does nothing.
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Pays Gatekeeper's notarization lookup at launch instead of on the Record
+/// button.
+///
+/// The lookup is per (volume, inode) and cached once it succeeds, so doing it
+/// once at startup — where nobody is waiting on it and the machine is most
+/// likely still online — means the spawn in `spawn` above is a normal `execve`
+/// by the time a user actually records.
+///
+/// Safe to run at launch because the sidecar opens no audio device until it is
+/// sent `start`: with stdin closed it reads EOF and `exit(0)`s on its own (see
+/// `main.swift`), so this neither prompts for microphone access nor leaves a
+/// process behind.
+///
+/// Best-effort by design. Every outcome — including "this machine is offline
+/// and the lookup hung" — is a log line and nothing more; a failure here must
+/// never stop the app from starting, and the bound in `spawn` still protects
+/// the Record path either way.
+pub async fn warm_gatekeeper(sidecar_bin: PathBuf) {
+    if !sidecar_bin.exists() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        SPAWN_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            Command::new(&sidecar_bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .map(|mut child| {
+                    // It exits on its own at EOF; this is the backstop for a
+                    // build that somehow does not.
+                    let _ = child.start_kill();
+                })
+        }),
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(Ok(Ok(()))) => tracing::info!(elapsed_ms, "recording.gatekeeper_warmed"),
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(elapsed_ms, error = %e, "recording.gatekeeper_warm_failed")
+        }
+        Ok(Err(e)) => tracing::warn!(elapsed_ms, error = %e, "recording.gatekeeper_warm_failed"),
+        // The offline case. Worth a warning rather than silence: it predicts
+        // that the next Record click is the one that will fail.
+        Err(_) => tracing::warn!(elapsed_ms, "recording.gatekeeper_warm_timeout"),
+    }
+}
+
 /// Spawn sequence: launch, await `Ready` (2s timeout), send
 /// `start`, await `Started` — folded into `CaptureEvent::Started` on the
 /// returned handle's channel by the time this returns.
@@ -105,10 +163,65 @@ pub async fn spawn(sidecar_bin: &Path, cfg: SidecarConfig) -> Result<SidecarHand
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = command.spawn().map_err(|e| AppError::Storage {
-        message: format!("recording_failed:sidecar_spawn_failed:{e}"),
-        correlation_id: crate::error::correlation_id(),
-    })?;
+    // `spawn` looks instantaneous and usually is, but the `execve` underneath
+    // it is gated by Gatekeeper: the first execution of a given binary
+    // triggers an *online* notarization lookup in `syspolicyd`, and the
+    // verdict is cached per (volume, inode). The ticket stapled to
+    // `Mnemos.app` does not cover this — we launch the sidecar by bare path,
+    // which Gatekeeper assesses separately as `NOT_A_BUNDLE` — which is why
+    // notarizing the build did not fix it.
+    //
+    // With no network that lookup sits waiting, and this call blocks with it.
+    // Clicking Record did nothing, silently, for as long as the machine
+    // stayed offline; restoring the network let the lookup finish and the
+    // recording started by itself, minutes later. `warm_gatekeeper` below
+    // pays this cost at launch so it is normally already cached by now; this
+    // bound is what stops the Record button hanging when it is not.
+    //
+    // It has to run on a blocking thread: `Command::spawn` is synchronous, so
+    // `tokio::time::timeout` around it directly would never get the chance to
+    // fire. If the bound trips, the task is still stuck inside `execve` — it
+    // cannot be cancelled, so the `Child` it eventually produces is dropped
+    // inside the task, and `kill_on_drop` reaps it rather than leaving an
+    // orphan capturing audio nobody is listening to.
+    let spawn_started = std::time::Instant::now();
+    let spawned = tokio::time::timeout(
+        SPAWN_TIMEOUT,
+        tokio::task::spawn_blocking(move || command.spawn()),
+    )
+    .await;
+    let spawn_ms = spawn_started.elapsed().as_millis() as u64;
+
+    let mut child = match spawned {
+        Ok(Ok(Ok(child))) => {
+            // Logged unconditionally: the only way to know whether this is
+            // biting real users is to have the number for every start, not
+            // just the ones that failed.
+            tracing::info!(spawn_ms, "recording.sidecar_spawned");
+            child
+        }
+        Ok(Ok(Err(e))) => {
+            tracing::error!(spawn_ms, error = %e, "recording.sidecar_spawn_failed");
+            return Err(AppError::Storage {
+                message: format!("recording_failed:sidecar_spawn_failed:{e}"),
+                correlation_id: crate::error::correlation_id(),
+            });
+        }
+        Ok(Err(e)) => {
+            tracing::error!(spawn_ms, error = %e, "recording.sidecar_spawn_panicked");
+            return Err(AppError::Storage {
+                message: format!("recording_failed:sidecar_spawn_failed:{e}"),
+                correlation_id: crate::error::correlation_id(),
+            });
+        }
+        Err(_) => {
+            tracing::error!(spawn_ms, "recording.sidecar_spawn_timeout");
+            return Err(AppError::Storage {
+                message: "recording_failed:sidecar_spawn_timeout".into(),
+                correlation_id: crate::error::correlation_id(),
+            });
+        }
+    };
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");

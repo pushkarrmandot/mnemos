@@ -504,6 +504,19 @@ pub fn run() {
             let version = app.package_info().version.to_string();
             tracing::info!(component = "host", version = %version, "mnemos starting");
 
+            // Pay Gatekeeper's notarization lookup for the audio sidecar now,
+            // in the background, rather than on the Record button — see
+            // `ipc::swift::warm_gatekeeper`. Spawned rather than awaited: it
+            // is best-effort, and on an offline machine it is precisely the
+            // thing that would otherwise stall startup.
+            #[cfg(target_os = "macos")]
+            {
+                let sidecar_bin = worker_config(app.handle())
+                    .map(|cfg| cfg.sidecar_bin)
+                    .unwrap_or_default();
+                tauri::async_runtime::spawn(crate::ipc::swift::warm_gatekeeper(sidecar_bin));
+            }
+
             let db_path = crate::fs::paths::db_path()?;
             let (storage, python, metrics) = tauri::async_runtime::block_on(async {
                 let pools = crate::db::init(&db_path).await?;
