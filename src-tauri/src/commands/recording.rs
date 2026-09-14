@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex as StdMutex;
 
 use serde::Serialize;
@@ -135,6 +135,33 @@ struct ActiveSession {
 pub struct RecordingRegistry {
     sessions: StdMutex<HashMap<u32, ActiveSession>>,
     next_id: AtomicU32,
+    /// Held from the moment a `start_recording` call is accepted until its
+    /// session is registered in `sessions`.
+    ///
+    /// `has_active_session()` alone cannot gate a second Record click,
+    /// because the session is not inserted until *after* the platform
+    /// capture has spawned — so for the whole duration of that spawn the
+    /// registry is empty and every concurrent caller sees "nothing is
+    /// recording". That window is normally milliseconds and is why this
+    /// looked fine; it stops being milliseconds the moment the spawn blocks,
+    /// which is exactly what Gatekeeper's notarization check does to the
+    /// audio sidecar on a machine that is offline. Four clicks during one
+    /// such stall produced four simultaneous captures writing four
+    /// conversations.
+    starting: AtomicBool,
+}
+
+/// Proof that this caller owns the in-flight start. Releases on drop, so a
+/// start that fails anywhere — spawn error, storage error, an early `?` —
+/// frees the claim without every exit path having to remember to.
+pub struct StartClaim<'a> {
+    registry: &'a RecordingRegistry,
+}
+
+impl Drop for StartClaim<'_> {
+    fn drop(&mut self) {
+        self.registry.starting.store(false, Ordering::SeqCst);
+    }
 }
 
 impl RecordingRegistry {
@@ -163,6 +190,7 @@ impl RecordingRegistry {
         Self {
             sessions: StdMutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
+            starting: AtomicBool::new(false),
         }
     }
 
@@ -189,6 +217,25 @@ impl RecordingRegistry {
     /// `commands::tray` before letting Quit through.
     pub fn has_active_session(&self) -> bool {
         !self.sessions.lock().unwrap().is_empty()
+    }
+
+    /// Claims the right to start a recording, or `None` if one is already
+    /// recording or already starting.
+    ///
+    /// Both halves are decided under the `sessions` lock, which is the same
+    /// lock `start_recording` takes to register its session — so a claim can
+    /// never be granted in the gap between "capture started" and "session
+    /// registered", and there is no window where both this and
+    /// `has_active_session()` read as free.
+    pub fn try_begin_start(&self) -> Option<StartClaim<'_>> {
+        let sessions = self.sessions.lock().unwrap();
+        if !sessions.is_empty() {
+            return None;
+        }
+        if self.starting.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        Some(StartClaim { registry: self })
     }
 
     /// Marks the session paused (or running again), returning `false` if it
@@ -349,6 +396,19 @@ pub async fn start_recording(
     // older shape let a recording started from a project land unfiled with
     // no error shown anywhere, with both the chip and the Recent
     // Conversations row quietly reading "No project".
+    // Claimed before anything is created, and released on drop however this
+    // returns. The frontend has its own gate (`useRequestStartRecording`),
+    // but that gate cannot see a click that arrives while a previous start is
+    // still in flight, and nothing stops another caller invoking this command
+    // directly — see AGENTS.md on start being a frontend-owned sequence.
+    let _claim = state.recording.try_begin_start().ok_or_else(|| {
+        tracing::warn!("recording.start_rejected_already_starting");
+        AppError::Validation {
+            message: "A recording is already in progress.".into(),
+            field: None,
+        }
+    })?;
+
     let started_at = now_ms() / 1000;
 
     let conversation = state
@@ -1733,6 +1793,61 @@ mod tests {
                 sidecar: None,
                 capture_watch_task: None,
             },
+        );
+    }
+
+    /// The bug this guards: a session is not registered until *after* the
+    /// platform capture spawns, so `has_active_session()` reads false for the
+    /// whole spawn. Normally milliseconds; unbounded when Gatekeeper stalls
+    /// the sidecar exec on an offline machine, which is how four clicks
+    /// became four simultaneous captures.
+    #[test]
+    fn a_second_start_is_refused_while_the_first_is_still_starting() {
+        let registry = RecordingRegistry::new();
+        assert!(
+            !registry.has_active_session(),
+            "precondition: nothing registered yet — this is exactly the state \
+             a concurrent caller sees mid-spawn"
+        );
+
+        let first = registry.try_begin_start().expect("first start is allowed");
+        assert!(
+            registry.try_begin_start().is_none(),
+            "a second start must be refused even though no session exists yet"
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn a_failed_start_releases_the_claim() {
+        let registry = RecordingRegistry::new();
+        {
+            let _claim = registry.try_begin_start().expect("allowed");
+        } // dropped as if `start_recording` had returned an error
+        assert!(
+            registry.try_begin_start().is_some(),
+            "a start that failed must not wedge the app into never recording again"
+        );
+    }
+
+    #[test]
+    fn a_start_is_refused_while_a_session_is_registered() {
+        let registry = RecordingRegistry::new();
+        insert_session(&registry, 1, now_ms());
+        assert!(
+            registry.try_begin_start().is_none(),
+            "the registered-session case is refused too, not just the starting one"
+        );
+    }
+
+    #[test]
+    fn a_new_start_is_allowed_once_the_session_is_gone() {
+        let registry = RecordingRegistry::new();
+        insert_session(&registry, 1, now_ms());
+        registry.sessions.lock().unwrap().clear();
+        assert!(
+            registry.try_begin_start().is_some(),
+            "stopping a recording must let the next one start"
         );
     }
 
