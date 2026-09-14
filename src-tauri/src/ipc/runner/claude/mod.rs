@@ -825,6 +825,35 @@ pub(crate) fn path_env_test_lock() -> &'static tokio::sync::Mutex<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A real corporate install answers `auth status --json` with six keys and
+    /// **no `email`** — an internal gateway login carries no personal address.
+    /// Pinned because a required `email` would make this whole payload fail to
+    /// deserialize and fall to the `Err(_)` arm, reporting a perfectly
+    /// signed-in machine as `Unknown`. `serde` ignores the keys we don't read;
+    /// that is load-bearing here, not incidental.
+    #[test]
+    fn auth_status_parses_when_logged_in_without_an_email() {
+        let payload = r#"{
+            "loggedIn": true,
+            "authMethod": "api",
+            "orgId": "org_abc123",
+            "projectsDirectory": "/Users/someone/.claude/projects",
+            "analyticsEnabled": false,
+            "subscriptionType": "enterprise"
+        }"#;
+        let status: AuthStatus = serde_json::from_str(payload).expect("six-key payload parses");
+        assert!(status.logged_in);
+        assert_eq!(status.email, None, "a missing email is normal, not a failure");
+        assert_eq!(status.subscription_type.as_deref(), Some("enterprise"));
+    }
+
+    #[test]
+    fn auth_status_reports_signed_out() {
+        let status: AuthStatus =
+            serde_json::from_str(r#"{"loggedIn": false}"#).expect("parses");
+        assert!(!status.logged_in);
+    }
     use super::*;
     use crate::ipc::runner::{ApprovalPolicy, PromptRequest};
     use tokio_stream::StreamExt;
