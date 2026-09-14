@@ -8,8 +8,10 @@ never retries — it fails the job immediately with a code
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
+from mnemos_worker import job_progress
 from mnemos_worker.errors import (
     AGENT_BLOCKED,
     CANCELLED,
@@ -23,15 +25,67 @@ from mnemos_worker.rpc_client import ReverseRpcError, call_reverse_rpc
 
 _NO_RETRY_KINDS = {"cli_missing", "cli_not_logged_in", "stream_corrupt"}
 
+# How often to tell the host we are still here while blocked on the agent.
+# Only needs to be comfortably under the host's silence window for these jobs
+# (`ExtractMemory::ttl`, 60s); frequent enough to survive one missed tick.
+_ALIVE_TICK_S = 10.0
+
+
+class _AliveTicker:
+    """Reports progress on a daemon thread for the duration of an agent call.
+
+    `call_reverse_rpc` blocks the job-executor thread on a `queue.Queue`, so
+    the thread doing the work cannot report anything while it waits — and the
+    host's request deadline bounds *silence* (`job_progress`). Without this,
+    an agent call longer than that window is swept mid-flight and the job
+    fails while the agent is still answering.
+
+    Ticking on a timer rather than on token arrival is deliberate. Token-driven
+    liveness sounds truer, but a corporate gateway that buffers the whole
+    response and returns it in one piece emits no tokens at all until it is
+    done (observed: `first_token_ms` within 10ms of a 100s `elapsed_ms`) —
+    which is exactly the case that was failing. A timer is indifferent to that.
+
+    This does not weaken the real bound on the agent: `call_reverse_rpc`'s own
+    `timeout_s` still caps the call, and a genuinely dead worker stops writing
+    frames entirely, so the host still fails it fast.
+
+    Writing frames from a second thread is already how this worker works — the
+    `Heartbeat` thread does it under the same `write_lock`.
+    """
+
+    def __init__(self, kind: str) -> None:
+        self._kind = kind
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_AliveTicker":
+        self._thread = threading.Thread(target=self._run, daemon=True, name="agent-alive")
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        # `wait` returning True means __exit__ fired; only tick on a timeout.
+        while not self._done.wait(_ALIVE_TICK_S):
+            # `report` is best-effort and never raises (see `job_progress`),
+            # so a broken notifier cannot fail an extraction that is working.
+            job_progress.report(self._kind, 0.0, waiting_on="agent")
+
 
 def _agent_call(prompt: str, system_prompt: str, timeout_ms: int) -> Any:
     timeout_s = timeout_ms / 1000 + 10
     try:
-        return call_reverse_rpc(
-            "run_agent_extraction",
-            {"prompt": prompt, "system_prompt": system_prompt, "timeout_ms": timeout_ms},
-            timeout_s,
-        )
+        with _AliveTicker("extract"):
+            return call_reverse_rpc(
+                "run_agent_extraction",
+                {"prompt": prompt, "system_prompt": system_prompt, "timeout_ms": timeout_ms},
+                timeout_s,
+            )
     except ReverseRpcError as exc:
         if exc.code == -32020:
             raise WorkerJobError(CANCELLED, f"agent timeout: {exc}") from exc

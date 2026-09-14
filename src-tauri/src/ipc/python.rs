@@ -488,9 +488,23 @@ impl WorkerRequest for ExtractMemory {
     const METHOD: &'static str = "extract_memory";
 
     fn ttl(&self) -> Duration {
-        // One `run_agent_extraction` turn (30s) plus one schema-retry
-        // turn plus scheduling slack.
-        Duration::from_secs(75)
+        // A *silence* window, not a work budget. This deliberately no longer
+        // encodes how long extraction may take: it used to say "one 30s
+        // `run_agent_extraction` turn plus a retry plus slack", which made a
+        // constant owned by `extract_memory.py` (`BASE_TIMEOUT_MS`) load-bearing
+        // in a second language with nothing linking the two. When that budget
+        // was raised to a scaled 180s+, this copy stayed at 30s' worth and
+        // capped every extraction at 75s — a 100s call on a corporate gateway
+        // failed the pipeline while the agent was still mid-response, then
+        // returned a perfectly good 9,940-char answer 25s later with nowhere
+        // to go.
+        //
+        // `agent_call.py` now reports progress while it blocks on the agent,
+        // so the deadline times silence and the two budgets are independent:
+        // the reverse-RPC `timeout_s` bounds the agent call (Python's to own,
+        // scaled to transcript size), this bounds a worker that has gone quiet.
+        // See `job_progress.py` — the same fix `transcribe_final` already got.
+        Duration::from_secs(60)
     }
 }
 
@@ -521,9 +535,9 @@ impl WorkerRequest for RefreshProjectMemory {
     const METHOD: &'static str = "refresh_project_memory";
 
     fn ttl(&self) -> Duration {
-        // One `run_agent_extraction` turn (60s, §5.2) plus one schema-retry
-        // turn plus scheduling slack.
-        Duration::from_secs(135)
+        // Silence window — see `ExtractMemory::ttl`. Same decoupling, same
+        // reason: this shares `_agent_call`, so it ticks while it waits.
+        Duration::from_secs(60)
     }
 }
 
@@ -799,8 +813,10 @@ impl WorkerSupervisor {
         match rx.await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(err)) => Err(map_json_rpc_error(err)),
-            // Sender dropped without a reply: disconnect drained the
-            // registry, or the TTL sweep evicted this entry.
+            // Sender dropped without a reply. Now that the TTL sweep answers
+            // its evictions explicitly (`-32020` above), this arm means only
+            // one thing: a disconnect drained the registry — so
+            // `WorkerUnavailable` is now literally true here.
             Err(_) => Err(self.unavailable_error()),
         }
     }
@@ -1354,22 +1370,40 @@ async fn ttl_sweep_task(sup: Arc<WorkerSupervisor>) {
         if sup.transport.lock().unwrap().is_none() {
             return; // superseded by a restart's own fresh sweep task
         }
-        let now = Instant::now();
-        let expired: Vec<u64> = {
-            let reg = sup.registry.lock().unwrap();
-            reg.iter()
-                .filter(|(_, e)| e.deadline < now)
-                .map(|(id, _)| *id)
-                .collect()
-        };
-        if expired.is_empty() {
-            continue;
-        }
-        let mut reg = sup.registry.lock().unwrap();
-        for id in expired {
-            reg.remove(&id); // dropping the sender fails the caller's `rx.await`
+        expire_due_entries(&sup, Instant::now());
+    }
+}
+
+/// Fails every registry entry past its deadline. Split out of
+/// `ttl_sweep_task` so the tests drive the real eviction path instead of a
+/// copy of it that can drift from the original.
+///
+/// Evictions are answered with an explicit timeout rather than by dropping the
+/// sender. A bare drop lands on `send_raw`'s `Err(_)` arm, which cannot tell an
+/// expired deadline from a worker that went away — so every swept request
+/// surfaced as `WorkerUnavailable`, sending whoever read the log hunting a dead
+/// worker that was in fact alive, heartbeating, and still working on the job.
+/// `-32020` is the worker's own timeout code and already maps to
+/// `AppError::Cancelled` ("timed out: ..."), so the whole downstream chain —
+/// frontend copy included — is unchanged.
+fn expire_due_entries(sup: &WorkerSupervisor, now: Instant) -> usize {
+    let mut reg = sup.registry.lock().unwrap();
+    let expired: Vec<u64> = reg
+        .iter()
+        .filter(|(_, e)| e.deadline < now)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in &expired {
+        if let Some(entry) = reg.remove(id) {
+            let ttl_s = entry.ttl.as_secs();
+            let _ = entry.tx.send(Err(JsonRpcErrorObj {
+                code: -32020,
+                message: format!("worker sent nothing for {ttl_s}s"),
+                data: None,
+            }));
         }
     }
+    expired.len()
 }
 
 async fn health_task(sup: Arc<WorkerSupervisor>) {
@@ -1578,6 +1612,45 @@ mod tests {
             system_path: PathBuf::from("/tmp/s.wav"),
         };
         assert_eq!(req().ttl(), Duration::from_secs(60));
+    }
+
+    /// Guards the decoupling, not the number. These TTLs bound how long the
+    /// worker may stay *silent*; they must never again be derived from how
+    /// long an agent call is allowed to take. That coupling — this constant
+    /// restating `extract_memory.py`'s `BASE_TIMEOUT_MS` in a second language,
+    /// with nothing linking them — is what let the extraction budget be raised
+    /// to a scaled 180s+ while this stayed at 30s' worth, capping every
+    /// extraction at 75s and failing jobs the agent went on to answer
+    /// correctly. `agent_call.py` now ticks while it waits, so silence is all
+    /// this has to measure.
+    ///
+    /// If you are here because a slow agent call is timing out, raise the
+    /// per-call budget in `extract_memory.py` — not this.
+    #[test]
+    fn memory_job_ttls_are_silence_windows_not_agent_budgets() {
+        let extract = ExtractMemory {
+            conversation_id: "c".into(),
+            transcript: Value::Null,
+            contacts: vec![],
+            notes: None,
+            conversation_meta: Value::Null,
+        };
+        let refresh = RefreshProjectMemory {
+            project_id: "p".into(),
+            current_memory: None,
+            new_extractions: vec![],
+            project_meta: Value::Null,
+        };
+        // Same silence window as `transcribe_final`: every job that reports
+        // progress gets the same tolerance, because the quantity being bounded
+        // is identical.
+        assert_eq!(extract.ttl(), Duration::from_secs(60));
+        assert_eq!(refresh.ttl(), Duration::from_secs(60));
+        assert!(
+            extract.ttl() < Duration::from_secs(180),
+            "a TTL at or above the extraction budget means it is timing work \
+             again rather than silence — see this test's doc comment"
+        );
     }
     use super::*;
 
@@ -1827,23 +1900,39 @@ mod tests {
             },
         );
 
-        let expired: Vec<u64> = {
-            let now = Instant::now();
-            let reg = sup.registry.lock().unwrap();
-            reg.iter()
-                .filter(|(_, e)| e.deadline < now)
-                .map(|(id, _)| *id)
-                .collect()
-        };
-        {
-            let mut reg = sup.registry.lock().unwrap();
-            for id in expired {
-                reg.remove(&id);
-            }
-        }
+        assert_eq!(expire_due_entries(&sup, Instant::now()), 1);
 
-        // Dropping the sender makes the receiver resolve to an error, which
-        // `send()` maps to `WorkerUnavailable` — no leaked/hanging caller.
-        assert!(rx.await.is_err());
+        // The caller is answered, not left to infer a failure from a dropped
+        // sender: an eviction is a timeout, and saying so is what keeps it from
+        // being reported as an unavailable worker.
+        let err = rx
+            .await
+            .expect("an evicted caller is answered, never left hanging")
+            .expect_err("an eviction is a failure");
+        assert_eq!(err.code, -32020, "-32020 maps to AppError::Cancelled");
+        assert!(
+            matches!(map_json_rpc_error(err), AppError::Cancelled { .. }),
+            "a swept request must surface as a timeout, not WorkerUnavailable"
+        );
+    }
+
+    /// A request still inside its deadline must survive a sweep — the whole
+    /// point of `job_progress` ticks re-arming `deadline`.
+    #[tokio::test]
+    async fn ttl_sweep_leaves_a_live_entry_alone() {
+        let sup = bare_supervisor();
+        let (tx, mut rx) = oneshot::channel();
+        sup.registry.lock().unwrap().insert(
+            7,
+            PendingEntry {
+                tx,
+                deadline: Instant::now() + Duration::from_secs(30),
+                ttl: Duration::from_secs(30),
+            },
+        );
+
+        assert_eq!(expire_due_entries(&sup, Instant::now()), 0);
+        assert_eq!(sup.registry.lock().unwrap().len(), 1);
+        assert!(rx.try_recv().is_err(), "a live request is not answered yet");
     }
 }

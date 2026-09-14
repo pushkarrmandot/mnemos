@@ -1,3 +1,4 @@
+import threading
 import pytest
 
 import mnemos_worker.agent_call as agent_call
@@ -165,3 +166,97 @@ def test_usage_limit_detected_by_data_kind_even_if_code_differs(monkeypatch):
             "extraction", "sys", "prompt", 30_000, _validator_requiring_field("ok")
         )
     assert exc_info.value.code == AGENT_BLOCKED
+
+
+def test_progress_is_reported_while_the_agent_call_blocks(monkeypatch):
+    """The regression that made this necessary: the host's request deadline
+    bounds silence, so an agent call longer than that window was swept
+    mid-flight and failed a job the agent went on to answer correctly. The
+    job-executor thread is blocked inside `call_reverse_rpc` for the whole
+    call, so the ticks have to come from somewhere else."""
+    import threading
+
+    from mnemos_worker import job_progress
+
+    ticks: list[tuple[str, dict]] = []
+    monkeypatch.setattr(agent_call, "_ALIVE_TICK_S", 0.01)
+    job_progress.configure_progress_notifier(lambda method, params: ticks.append((method, params)))
+    job_progress.set_current_request_id("job-1")
+
+    def slow_call(method, params, timeout_s):
+        # Stand-in for a gateway that returns nothing at all until it is done.
+        threading.Event().wait(0.15)
+        return {"ok": True}
+
+    monkeypatch.setattr(agent_call, "call_reverse_rpc", slow_call)
+    try:
+        out = agent_call.call_with_one_retry(
+            "extraction", "sys", "prompt", 30_000, _validator_requiring_field("ok")
+        )
+    finally:
+        job_progress.set_current_request_id(None)
+        job_progress.configure_progress_notifier(None)
+
+    assert out == {"ok": True}
+    assert ticks, "a blocked agent call must still report liveness"
+    method, params = ticks[0]
+    assert method == job_progress.TOPIC
+    assert params["request_id"] == "job-1", "ticks must re-arm the right request"
+
+
+def test_ticker_stops_once_the_call_returns(monkeypatch):
+    """A thread left ticking after the call would keep a finished request's
+    deadline alive and leak one thread per extraction."""
+    from mnemos_worker import job_progress
+
+    ticks: list[object] = []
+    monkeypatch.setattr(agent_call, "_ALIVE_TICK_S", 0.01)
+    job_progress.configure_progress_notifier(lambda method, params: ticks.append(params))
+    job_progress.set_current_request_id("job-2")
+    monkeypatch.setattr(agent_call, "call_reverse_rpc", lambda *a, **k: {"ok": True})
+    try:
+        agent_call.call_with_one_retry(
+            "extraction", "sys", "prompt", 30_000, _validator_requiring_field("ok")
+        )
+        settled = len(ticks)
+        threading.Event().wait(0.05)
+        assert len(ticks) == settled, "no ticks may arrive after the call returned"
+    finally:
+        job_progress.set_current_request_id(None)
+        job_progress.configure_progress_notifier(None)
+
+
+def test_a_broken_notifier_cannot_fail_an_extraction(monkeypatch):
+    """Liveness reporting is best-effort: it runs alongside work that is
+    otherwise succeeding and must never be able to fail it."""
+    from mnemos_worker import job_progress
+
+    monkeypatch.setattr(agent_call, "_ALIVE_TICK_S", 0.01)
+
+    attempts: list[object] = []
+
+    def exploding(method, params):
+        attempts.append(params)
+        raise RuntimeError("notifier is broken")
+
+    job_progress.configure_progress_notifier(exploding)
+    job_progress.set_current_request_id("job-3")
+
+    def slow_call(method, params, timeout_s):
+        threading.Event().wait(0.2)
+        return {"ok": True}
+
+    monkeypatch.setattr(agent_call, "call_reverse_rpc", slow_call)
+    try:
+        out = agent_call.call_with_one_retry(
+            "extraction", "sys", "prompt", 30_000, _validator_requiring_field("ok")
+        )
+    finally:
+        job_progress.set_current_request_id(None)
+        job_progress.configure_progress_notifier(None)
+
+    assert out == {"ok": True}
+    # The real property: the loop survives a raising notifier instead of dying
+    # on the first tick. A ticker that stopped here would silently stop
+    # re-arming the deadline and the sweep would fail the job anyway.
+    assert len(attempts) > 1, "the ticker must keep reporting after a notifier raises"
