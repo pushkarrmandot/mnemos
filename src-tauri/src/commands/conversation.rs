@@ -607,13 +607,29 @@ pub async fn conversation_retry_step(
         });
     }
 
-    let outcome = crate::memory::extract_conversation(
+    // Logged, not just returned. `?` alone sends the error to the UI and
+    // leaves the log silent, so a user reporting "retry didn't work" produced
+    // a log file in which the retry never appears to have happened — the
+    // successful retries are visible and the failing one simply is not, which
+    // is the worst possible shape for a bug report.
+    let outcome = match crate::memory::extract_conversation(
         &state.storage,
         &state.python,
         &conversation_id,
         force_overwrite,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            tracing::error!(
+                conversation_id,
+                error = %err,
+                "conversation.retry_step_extraction_failed"
+            );
+            return Err(err);
+        }
+    };
     tracing::info!(
         conversation_id,
         action_items = outcome.action_items,
