@@ -209,8 +209,11 @@ pub async fn probe_health() -> RunnerHealth {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    // `procutil` rather than a bare `creation_flags`: the constant lives
+    // there, and that module exists precisely so each spawn site does not
+    // re-derive this. Writing it inline compiled fine on macOS — nothing here
+    // is `cfg(windows)`-active — and broke the Windows build.
+    crate::procutil::suppress_console_window_tokio(&mut command);
 
     let output =
         match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
@@ -844,18 +847,30 @@ mod tests {
         }"#;
         let status: AuthStatus = serde_json::from_str(payload).expect("six-key payload parses");
         assert!(status.logged_in);
-        assert_eq!(status.email, None, "a missing email is normal, not a failure");
+        assert_eq!(
+            status.email, None,
+            "a missing email is normal, not a failure"
+        );
         assert_eq!(status.subscription_type.as_deref(), Some("enterprise"));
     }
 
     #[test]
     fn auth_status_reports_signed_out() {
-        let status: AuthStatus =
-            serde_json::from_str(r#"{"loggedIn": false}"#).expect("parses");
+        let status: AuthStatus = serde_json::from_str(r#"{"loggedIn": false}"#).expect("parses");
         assert!(!status.logged_in);
     }
     use super::*;
-    use crate::ipc::runner::{ApprovalPolicy, PromptRequest};
+    use crate::ipc::runner::ApprovalPolicy;
+    // Gated to match the tests that use them: the runner tests drive a fake
+    // `claude` built as a shell script, so they are `cfg(unix)` and these two
+    // are genuinely unused on Windows — where CI builds with `-D warnings`
+    // and an unused import is an error, not a warning. `ApprovalPolicy` stays
+    // ungated: `extraction_config` below uses it and is not itself gated, so
+    // gating the import would turn an unused-import warning into an
+    // unresolved-name error.
+    #[cfg(unix)]
+    use crate::ipc::runner::PromptRequest;
+    #[cfg(unix)]
     use tokio_stream::StreamExt;
 
     fn extraction_config(model: &str) -> RunnerConfig {
